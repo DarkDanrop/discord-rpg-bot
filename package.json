@@ -3,8 +3,12 @@
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
-  
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "@discordjs/voice": "^0.17.0",
     "discord.js": "^14.15.3",
