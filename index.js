@@ -85,12 +85,19 @@ async function connectAgentWS(guild) {
 
     // opcional: override de config (prompt/voz/etc)
     ws.send(JSON.stringify({
-      type: "conversation_initiation_client_data",
-      dynamic_variables: {
-        // exemplo: você pode passar coisas do Discord aqui
-        guild_name: guild.name
-      }
-    }));
+  type: "conversation_initiation_client_data",
+  conversation_config_override: {
+    conversation_mode: "conversation",
+    response_timing: "natural",
+    allow_interruptions: true,
+    language: "pt-BR"
+  },
+  dynamic_variables: {
+    guild_name: guild.name,
+    context: "mesa de RPG por voz no Discord"
+  }
+}));
+
   });
 
   ws.on("message", (data) => {
