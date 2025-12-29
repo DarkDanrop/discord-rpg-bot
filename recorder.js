@@ -14,45 +14,53 @@ function ensureDir(dir) {
 
 function nowStamp() {
   const d = new Date();
-  // yyyy-mm-dd_hh-mm-ss
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
 }
 
-/**
- * Entra no canal e grava cada usuário em um .pcm separado
- * (Etapa 1 = estabilidade do Opus + não quebrar em EOF)
- */
+// Railway: grava em /tmp (é o lugar “mais seguro” em containers)
+function getRecordingsDir() {
+  const base = process.env.RECORDINGS_DIR || '/tmp';
+  return path.join(base, 'recordings');
+}
+
 export async function joinAndRecord(client, guildId, voiceChannelId) {
   const guild = await client.guilds.fetch(guildId);
   const channel = await guild.channels.fetch(voiceChannelId);
 
-  if (!channel || channel.type !== 2) { // 2 = GuildVoice (VoiceChannel)
+  // 2 = GuildVoice no discord.js v14
+  if (!channel || channel.type !== 2) {
     throw new Error('VOICE_CHANNEL_ID não parece ser um canal de voz válido.');
   }
 
-  const recordingsDir = path.resolve(process.cwd(), 'recordings');
+  const recordingsDir = getRecordingsDir();
   ensureDir(recordingsDir);
 
   console.log(`Entrando no canal de voz: ${channel.name}`);
+  console.log(`Gravando em: ${recordingsDir}`);
 
   const connection = joinVoiceChannel({
     channelId: channel.id,
     guildId: guild.id,
     adapterCreator: guild.voiceAdapterCreator,
-    selfDeaf: false,  // importante: ouvir todo mundo
-    selfMute: true,   // bot não fala
+    selfDeaf: false,
+    selfMute: true,
   });
+
+  // evita conexão duplicada se rodar 2 instâncias
+  const existing = getVoiceConnection(guild.id);
+  if (existing && existing !== connection) {
+    try { existing.destroy(); } catch {}
+  }
 
   const receiver = connection.receiver;
 
-  // Estado: 1 stream ativo por userId
-  const active = new Map(); // userId -> { opusStream, decoder, out, filename }
+  // userId -> streams
+  const active = new Map();
 
   function cleanup(userId) {
     const s = active.get(userId);
     if (!s) return;
-
     active.delete(userId);
 
     try { s.opusStream.unpipe(); } catch {}
@@ -60,35 +68,33 @@ export async function joinAndRecord(client, guildId, voiceChannelId) {
     try { s.opusStream.destroy(); } catch {}
     try { s.out.end(); } catch {}
 
-    console.log(`✅ finalizou gravação: ${s.filename}`);
+    console.log(`✅ finalizou: ${s.filename}`);
   }
 
   function startUser(userId) {
-    if (active.has(userId)) return; // ignora start duplicado
+    if (active.has(userId)) return;
+    if (client.user && userId === client.user.id) return;
 
     const filename = path.join(recordingsDir, `${userId}-${nowStamp()}.pcm`);
 
-    // pega o stream opus do usuário
     const opusStream = receiver.subscribe(userId, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
-        duration: 250, // ms de silêncio pra encerrar
+        duration: 250,
       },
     });
 
-    // decoder opus -> PCM
     const decoder = new prism.opus.Decoder({
       rate: 48000,
       channels: 2,
-      frameSize: 960, // 20ms @ 48k
+      frameSize: 960,
     });
 
     const out = fs.createWriteStream(filename);
 
-    // pipeline: opus -> decoder -> arquivo
     opusStream.pipe(decoder).pipe(out);
 
-    // Se qualquer coisa terminar/der erro, limpa tudo (evita push-after-eof)
+    // qualquer finalização/erro limpa tudo (evita “push after EOF”)
     opusStream.once('end', () => cleanup(userId));
     opusStream.once('close', () => cleanup(userId));
     opusStream.once('error', () => cleanup(userId));
@@ -96,33 +102,17 @@ export async function joinAndRecord(client, guildId, voiceChannelId) {
     out.once('error', () => cleanup(userId));
 
     active.set(userId, { opusStream, decoder, out, filename });
-
     console.log(`🎙️ gravando userId=${userId} -> ${filename}`);
   }
 
   function stopUser(userId) {
     const s = active.get(userId);
-    if (!s) return; // ignora end duplicado
+    if (!s) return;
     try { s.opusStream.destroy(); } catch {}
   }
 
-  // Eventos de fala (o que tava te quebrando)
-  receiver.speaking.on('start', (userId) => {
-    // opcional: ignorar o próprio bot
-    if (client.user && userId === client.user.id) return;
-    startUser(userId);
-  });
+  receiver.speaking.on('start', startUser);
+  receiver.speaking.on('end', stopUser);
 
-  receiver.speaking.on('end', (userId) => {
-    if (client.user && userId === client.user.id) return;
-    stopUser(userId);
-  });
-
-  // Só pra evitar conexões duplicadas caso você rode 2x
-  const existing = getVoiceConnection(guild.id);
-  if (existing && existing !== connection) {
-    try { existing.destroy(); } catch {}
-  }
-
-  console.log('✅ pronto: fale no canal e veja arquivos aparecendo em /recordings');
+  console.log('✅ pronto: fale no canal e verifique os .pcm em recordings/');
 }
