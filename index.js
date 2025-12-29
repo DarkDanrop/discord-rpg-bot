@@ -17,13 +17,15 @@ if (!DISCORD_TOKEN || !GUILD_ID || !VOICE_CHANNEL_ID) {
 }
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-async function onReady() {
+let booted = false;
+
+async function boot() {
+  if (booted) return;
+  booted = true;
+
   try {
     console.log(`Logado como ${client.user.tag}`);
 
@@ -45,29 +47,31 @@ async function onReady() {
       selfMute: false,
     });
 
-    // IMPORTANTÍSSIMO: sem isso, o erro derruba o process e o Railway fica restartando
     connection.on("error", (err) => {
       console.error("VoiceConnection error:", err?.message || err);
-    });
-
-    connection.on(VoiceConnectionStatus.Disconnected, () => {
-      console.warn("VoiceConnection: Disconnected");
     });
 
     await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
     console.log("✅ VoiceConnection: Ready (conectado no canal)");
 
-    // Se você chama teu recorder aqui, mantenha a linha abaixo e troque pelo teu start
+    // Se você tiver recorder.js, chama aqui:
     // require("./recorder").startRecording(connection, channel);
 
   } catch (err) {
-    console.error("Erro no onReady:", err);
+    console.error("Erro no boot:", err);
     process.exit(1);
   }
 }
 
-// Compat: discord.js v14 (ready) vs v15 (clientReady)
-client.once("ready", onReady);
-client.once("clientReady", onReady);
+// discord.js v14 usa 'ready'.
+// v15 renomeia pra 'clientReady'.
+// Pra cobrir ambos sem duplicar, checa se existe o evento e registra só 1.
+if (client.on.length) {
+  // Registra os dois, mas protege com booted
+  client.once("ready", boot);
+  client.once("clientReady", boot);
+} else {
+  client.once("ready", boot);
+}
 
 client.login(DISCORD_TOKEN);
