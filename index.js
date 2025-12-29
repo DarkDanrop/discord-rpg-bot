@@ -21,55 +21,96 @@ const client = new Client({
 });
 
 let booted = false;
+let connection = null;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function connectVoice() {
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const channel = await guild.channels.fetch(VOICE_CHANNEL_ID);
+
+  if (!channel || !channel.isVoiceBased?.()) {
+    throw new Error("VOICE_CHANNEL_ID não parece ser um canal de voz válido.");
+  }
+
+  console.log(`Entrando no canal de voz: ${channel.name}`);
+
+  connection = joinVoiceChannel({
+    channelId: VOICE_CHANNEL_ID,
+    guildId: GUILD_ID,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: false,
+    selfMute: false,
+  });
+
+  connection.on("error", (err) => {
+    console.error("VoiceConnection error:", err?.message || err);
+  });
+
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    console.warn("⚠️ VoiceConnection: Disconnected — tentando reconectar...");
+    try {
+      // tenta recuperar rápido
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+      ]);
+      console.log("✅ reconectou (signalling/connecting)");
+    } catch {
+      // reconecta do zero
+      try {
+        connection.destroy();
+      } catch {}
+      await sleep(1500);
+      await safeConnectLoop();
+    }
+  });
+
+  await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+  console.log("✅ VoiceConnection: Ready (conectado no canal)");
+}
+
+async function safeConnectLoop() {
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      console.log(`🔁 tentativa de conectar no voice: ${attempt}/10`);
+      await connectVoice();
+      return; // sucesso
+    } catch (err) {
+      const msg = err?.message || String(err);
+      console.error("Erro ao conectar voice:", msg);
+
+      // erro típico do Railway / cloud UDP discovery
+      // a gente só tenta de novo em vez de matar o container
+      await sleep(3000);
+    }
+  }
+
+  console.error("❌ não consegui conectar no voice após 10 tentativas.");
+  // não dá exit; deixa rodando pra você ver logs e ajustar rede
+}
 
 async function boot() {
   if (booted) return;
   booted = true;
 
-  try {
-    console.log(`Logado como ${client.user.tag}`);
+  console.log(`Logado como ${client.user.tag}`);
+  await safeConnectLoop();
 
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const channel = await guild.channels.fetch(VOICE_CHANNEL_ID);
-
-    if (!channel || !channel.isVoiceBased?.()) {
-      console.error("VOICE_CHANNEL_ID não parece ser um canal de voz válido.");
-      process.exit(1);
-    }
-
-    console.log(`Entrando no canal de voz: ${channel.name}`);
-
-    const connection = joinVoiceChannel({
-      channelId: VOICE_CHANNEL_ID,
-      guildId: GUILD_ID,
-      adapterCreator: guild.voiceAdapterCreator,
-      selfDeaf: false,
-      selfMute: false,
-    });
-
-    connection.on("error", (err) => {
-      console.error("VoiceConnection error:", err?.message || err);
-    });
-
-    await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
-    console.log("✅ VoiceConnection: Ready (conectado no canal)");
-
-    // Se você tiver recorder.js, chama aqui:
-    // require("./recorder").startRecording(connection, channel);
-
-  } catch (err) {
-    console.error("Erro no boot:", err);
-    process.exit(1);
-  }
+  // aqui depois a gente liga o recorder de verdade (Etapa 4 parte 2)
+  // require("./recorder").startRecording(connection);
 }
 
-// discord.js v14 usa 'ready'.
-// v15 renomeia pra 'clientReady'.
-// Pra cobrir ambos sem duplicar, checa se existe o evento e registra só 1.
-if (client.on.length) {
-  // Registra os dois, mas protege com booted
-  client.once("ready", boot);
-  client.once("clientReady", boot);
+// remove o warning: no v14 use ready; no v15 use clientReady
+if (typeof client.once === "function") {
+  if ("clientReady" in client) {
+    // alguns builds expõem isso, mas o evento é o nome que importa
+    client.once("clientReady", boot);
+  } else {
+    client.once("ready", boot);
+  }
 } else {
   client.once("ready", boot);
 }
