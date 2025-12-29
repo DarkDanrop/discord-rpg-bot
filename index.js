@@ -113,17 +113,8 @@ async function boot() {
   // require("./recorder").startRecording(connection);
 }
 
-// remove o warning: no v14 use ready; no v15 use clientReady
-if (typeof client.once === "function") {
-  if ("clientReady" in client) {
-    // alguns builds expõem isso, mas o evento é o nome que importa
-    client.once("clientReady", boot);
-  } else {
-    client.once("ready", boot);
-  }
-} else {
-  client.once("ready", boot);
-}
+// usa o novo evento clientReady para evitar o warning de depreciação do v15
+client.once("clientReady", boot);
 
 client.login(DISCORD_TOKEN);
 
