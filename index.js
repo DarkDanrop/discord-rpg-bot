@@ -1,6 +1,6 @@
 require("dotenv").config();
 
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, Events, GatewayIntentBits } = require("discord.js");
 const {
   joinVoiceChannel,
   VoiceConnectionStatus,
@@ -131,8 +131,8 @@ async function boot() {
   // require("./recorder").startRecording(connection);
 }
 
-// usa o novo evento clientReady para evitar o warning de depreciação do v15
-client.once("clientReady", boot);
+// usa o evento ClientReady recomendado no discord.js v14
+client.once(Events.ClientReady, boot);
 
 client.login(DISCORD_TOKEN);
 
