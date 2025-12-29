@@ -17,17 +17,28 @@ if (!DISCORD_TOKEN || !GUILD_ID || !VOICE_CHANNEL_ID) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 let booted = false;
 let connection = null;
+
+const COMMAND_PREFIX = "!";
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 async function connectVoice() {
+  if (connection && connection.state?.status !== VoiceConnectionStatus.Destroyed) {
+    return connection;
+  }
+
   const guild = await client.guilds.fetch(GUILD_ID);
   const channel = await guild.channels.fetch(VOICE_CHANNEL_ID);
 
@@ -52,14 +63,12 @@ async function connectVoice() {
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
     console.warn("⚠️ VoiceConnection: Disconnected — tentando reconectar...");
     try {
-      // tenta recuperar rápido
       await Promise.race([
         entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
       ]);
       console.log("✅ reconectou (signalling/connecting)");
     } catch {
-      // reconecta do zero
       try {
         connection.destroy();
       } catch {}
@@ -70,6 +79,7 @@ async function connectVoice() {
 
   await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
   console.log("✅ VoiceConnection: Ready (conectado no canal)");
+  return connection;
 }
 
 async function safeConnectLoop() {
@@ -116,3 +126,59 @@ if (typeof client.once === "function") {
 }
 
 client.login(DISCORD_TOKEN);
+
+client.on("messageCreate", async (message) => {
+  if (!message.content?.startsWith(COMMAND_PREFIX)) return;
+  if (message.author.bot) return;
+
+  const [command] = message.content
+    .slice(COMMAND_PREFIX.length)
+    .trim()
+    .split(/\s+/);
+
+  const cmd = command?.toLowerCase();
+
+  if (cmd === "ping") {
+    await message.reply("Pong!");
+    return;
+  }
+
+  if (cmd === "help") {
+    await message.reply(
+      [
+        "Comandos disponíveis:",
+        "!join - conecta no canal de voz configurado",
+        "!leave - sai do canal de voz",
+        "!ping - teste rápido de vida do bot",
+        "!help - mostra esta mensagem",
+      ].join("\n")
+    );
+    return;
+  }
+
+  if (cmd === "join") {
+    try {
+      await safeConnectLoop();
+      await message.reply("Entrei (ou já estava) no canal de voz configurado.");
+    } catch (err) {
+      const reason = err?.message || String(err);
+      await message.reply(`Não consegui entrar no voice: ${reason}`);
+    }
+    return;
+  }
+
+  if (cmd === "leave") {
+    if (connection) {
+      try {
+        connection.destroy();
+        connection = null;
+        await message.reply("Saí do canal de voz.");
+      } catch (err) {
+        const reason = err?.message || String(err);
+        await message.reply(`Erro ao sair do voice: ${reason}`);
+      }
+    } else {
+      await message.reply("Não estou em nenhum canal de voz agora.");
+    }
+  }
+});
