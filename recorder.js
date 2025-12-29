@@ -1,12 +1,12 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import prism from 'prism-media';
+const fs = require('node:fs');
+const path = require('node:path');
+const prism = require('prism-media');
 
-import {
+const {
   joinVoiceChannel,
   EndBehaviorType,
   getVoiceConnection,
-} from '@discordjs/voice';
+} = require('@discordjs/voice');
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -24,7 +24,7 @@ function getRecordingsDir() {
   return path.join(base, 'recordings');
 }
 
-export async function joinAndRecord(client, guildId, voiceChannelId) {
+async function joinAndRecord(client, guildId, voiceChannelId) {
   const guild = await client.guilds.fetch(guildId);
   const channel = await guild.channels.fetch(voiceChannelId);
 
@@ -116,3 +116,5 @@ export async function joinAndRecord(client, guildId, voiceChannelId) {
 
   console.log('✅ pronto: fale no canal e verifique os .pcm em recordings/');
 }
+
+module.exports = { joinAndRecord };
