@@ -77,7 +77,25 @@ async function connectVoice() {
     }
   });
 
-  await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+  let errorListener;
+  const errorPromise = new Promise((_, reject) => {
+    errorListener = (err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      reject(error);
+    };
+    connection.once("error", errorListener);
+  });
+
+  try {
+    await Promise.race([
+      entersState(connection, VoiceConnectionStatus.Ready, 20_000),
+      errorPromise,
+    ]);
+  } finally {
+    if (errorListener) {
+      connection.off("error", errorListener);
+    }
+  }
   console.log("✅ VoiceConnection: Ready (conectado no canal)");
   return connection;
 }
