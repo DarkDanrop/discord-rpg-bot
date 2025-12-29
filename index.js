@@ -1,6 +1,6 @@
 require("dotenv").config();
 
-const { Client, Events, GatewayIntentBits } = require("discord.js");
+const { Client, Events, GatewayIntentBits, Partials } = require("discord.js");
 const {
   joinVoiceChannel,
   VoiceConnectionStatus,
@@ -22,7 +22,9 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages,
   ],
+  partials: [Partials.Channel],
 });
 
 let booted = false;
