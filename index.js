@@ -5,11 +5,11 @@ import {
   createAudioPlayer,
   createAudioResource,
   EndBehaviorType,
-  StreamType
+  StreamType,
 } from "@discordjs/voice";
 import prism from "prism-media";
 import WebSocket from "ws";
-import { PassThrough, Readable } from "stream";
+import { PassThrough } from "stream";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
@@ -24,181 +24,195 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
-const stateByGuild = new Map(); // guildId -> { ws, audioOut, player }
+const guildState = new Map(); // guildId -> { ws, out, player, conn }
 
-function downsample48kTo16k(pcm48k) {
-  // pcm48k: Buffer int16 LE mono @48000
-  // 48k -> 16k = fator 3: pega 1 a cada 3 samples
-  const in16 = new Int16Array(pcm48k.buffer, pcm48k.byteOffset, Math.floor(pcm48k.length / 2));
-  const outLen = Math.floor(in16.length / 3);
-  const out16 = new Int16Array(outLen);
-  for (let i = 0, j = 0; j < outLen; i += 3, j++) out16[j] = in16[i];
-  return Buffer.from(out16.buffer);
-}
-
-function upsample16kTo48k(pcm16k) {
-  // 16k -> 48k = fator 3: repete samples (simples e ok pra voz)
-  const in16 = new Int16Array(pcm16k.buffer, pcm16k.byteOffset, Math.floor(pcm16k.length / 2));
-  const out16 = new Int16Array(in16.length * 3);
-  for (let i = 0; i < in16.length; i++) {
-    const v = in16[i];
-    const o = i * 3;
-    out16[o] = v;
-    out16[o + 1] = v;
-    out16[o + 2] = v;
-  }
-  return Buffer.from(out16.buffer);
-}
-
-async function getSignedUrl(agentId) {
-  // GET https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=...
-  const url = `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(agentId)}`;
-  const res = await fetch(url, { headers: { "xi-api-key": ELEVENLABS_API_KEY } });
-  if (!res.ok) throw new Error(`Signed URL erro ${res.status}`);
-  const json = await res.json();
-  if (!json?.signed_url) throw new Error("Signed URL inválida");
-  return json.signed_url;
-}
-
-function ensureGuildState(guildId) {
-  let s = stateByGuild.get(guildId);
+function getState(guildId) {
+  let s = guildState.get(guildId);
   if (!s) {
-    s = { ws: null, audioOut: null, player: createAudioPlayer() };
-    stateByGuild.set(guildId, s);
+    s = { ws: null, out: null, player: createAudioPlayer(), conn: null };
+    guildState.set(guildId, s);
   }
   return s;
 }
 
-async function connectAgentWS(guild) {
-  const s = ensureGuildState(guild.id);
-  if (s.ws) return s.ws;
+// Discord receiver -> PCM 48k int16 mono
+// Eleven convai audio -> PCM 16k int16 mono (na prática, é o formato mais comum)
+// Vamos fazer downsample/upsample simples (x3) pra funcionar.
+function downsample48kTo16k(pcm48k) {
+  const input = new Int16Array(pcm48k.buffer, pcm48k.byteOffset, Math.floor(pcm48k.length / 2));
+  const outLen = Math.floor(input.length / 3);
+  const out = new Int16Array(outLen);
+  for (let i = 0, j = 0; j < outLen; i += 3, j++) out[j] = input[i];
+  return Buffer.from(out.buffer);
+}
 
-  const signedUrl = await getSignedUrl(ELEVENLABS_AGENT_ID);
+function upsample16kTo48k(pcm16k) {
+  const input = new Int16Array(pcm16k.buffer, pcm16k.byteOffset, Math.floor(pcm16k.length / 2));
+  const out = new Int16Array(input.length * 3);
+  for (let i = 0; i < input.length; i++) {
+    const v = input[i];
+    const o = i * 3;
+    out[o] = v;
+    out[o + 1] = v;
+    out[o + 2] = v;
+  }
+  return Buffer.from(out.buffer);
+}
+
+async function getSignedUrl() {
+  const url = `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(
+    ELEVENLABS_AGENT_ID
+  )}`;
+
+  const res = await fetch(url, {
+    headers: { "xi-api-key": ELEVENLABS_API_KEY },
+  });
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`❌ get-signed-url ${res.status}: ${t.slice(0, 200)}`);
+  }
+
+  const json = await res.json();
+  if (!json?.signed_url) throw new Error("❌ signed_url não veio na resposta");
+  return json.signed_url;
+}
+
+async function connectAgent(guild) {
+  const s = getState(guild.id);
+  if (s.ws && s.ws.readyState === WebSocket.OPEN) return s.ws;
+
+  const signedUrl = await getSignedUrl();
   const ws = new WebSocket(signedUrl);
 
   ws.on("open", () => {
     console.log("✅ Agent WS conectado");
 
-    // opcional: override de config (prompt/voz/etc)
-    ws.send(JSON.stringify({
-  type: "conversation_initiation_client_data",
-  conversation_config_override: {
-    conversation_mode: "conversation",
-    response_timing: "natural",
-    allow_interruptions: true,
-    language: "pt-BR"
-  },
-  dynamic_variables: {
-    guild_name: guild.name,
-    context: "mesa de RPG por voz no Discord"
-  }
-}));
-
+    // “empurrão” pra modo conversa (ajuda o agent a se comportar como player)
+    ws.send(
+      JSON.stringify({
+        type: "conversation_initiation_client_data",
+        conversation_config_override: {
+          conversation_mode: "conversation",
+          response_timing: "natural",
+          allow_interruptions: true,
+          language: "pt-BR",
+        },
+        dynamic_variables: {
+          guild_name: guild.name,
+          context: "mesa de RPG por voz no Discord. Você é um jogador (player), não o mestre.",
+        },
+      })
+    );
   });
 
   ws.on("message", (data) => {
+    let msg;
     try {
-      const msg = JSON.parse(data.toString());
+      msg = JSON.parse(data.toString());
+    } catch {
+      return;
+    }
 
-      if (msg.type === "ping") {
-        // responder pong
-        ws.send(JSON.stringify({ type: "pong", event_id: msg.ping_event?.event_id }));
-        return;
-      }
+    // ping/pong
+    if (msg.type === "ping") {
+      ws.send(JSON.stringify({ type: "pong", event_id: msg.ping_event?.event_id }));
+      return;
+    }
 
-      if (msg.type === "conversation_initiation_metadata") {
-        console.log("🧠 conversation_id:", msg.conversation_initiation_metadata_event?.conversation_id);
-        console.log("🎚️ formatos:", msg.conversation_initiation_metadata_event);
-        return;
-      }
+    // debug úteis
+    if (msg.type === "conversation_initiation_metadata") {
+      const meta = msg.conversation_initiation_metadata_event;
+      console.log("🧠 conversation_id:", meta?.conversation_id);
+      return;
+    }
+    if (msg.type === "user_transcript") {
+      console.log("🗣️ transcript:", msg.user_transcription_event?.user_transcript);
+      return;
+    }
+    if (msg.type === "agent_response") {
+      console.log("🤖 agent_response:", msg.agent_response_event?.agent_response);
+      return;
+    }
 
-      if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
-        const pcm16k = Buffer.from(msg.audio_event.audio_base_64, "base64");
-        const pcm48k = upsample16kTo48k(pcm16k);
-        // manda pro stream de saída contínuo
-        if (s.audioOut) s.audioOut.write(pcm48k);
-        return;
-      }
+    // áudio do agent
+    if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
+      const s2 = getState(guild.id);
+      if (!s2.out) return;
 
-      // úteis pra debug
-      if (msg.type === "user_transcript") {
-        console.log("🗣️ transcript:", msg.user_transcription_event?.user_transcript);
-      }
-      if (msg.type === "agent_response") {
-        console.log("🤖 resposta:", msg.agent_response_event?.agent_response);
-      }
-    } catch (e) {
-      // mensagens não-JSON (raro) ou parse error
-      console.log("WS msg (raw):", data.toString().slice(0, 200));
+      const pcm16k = Buffer.from(msg.audio_event.audio_base_64, "base64");
+      const pcm48k = upsample16kTo48k(pcm16k);
+      s2.out.write(pcm48k);
     }
   });
 
   ws.on("close", () => {
     console.log("⚠️ Agent WS desconectou");
-    s.ws = null;
+    const s2 = getState(guild.id);
+    s2.ws = null;
   });
 
-  ws.on("error", (err) => console.error("WS erro:", err));
+  ws.on("error", (e) => console.error("WS erro:", e));
 
   s.ws = ws;
   return ws;
 }
 
-function startAudioOutput(conn, guild) {
-  const s = ensureGuildState(guild.id);
+function startOutput(conn, guild) {
+  const s = getState(guild.id);
 
-  // stream contínuo de PCM 48k mono 16-bit
+  // stream contínuo de PCM raw 48k mono
   const out = new PassThrough();
-  s.audioOut = out;
+  s.out = out;
 
   conn.subscribe(s.player);
-
   const resource = createAudioResource(out, { inputType: StreamType.Raw });
   s.player.play(resource);
 
-  console.log("🎧 Audio output iniciado (tocando respostas do agent)");
+  console.log("🎧 Output iniciado (tocando áudio do agent no Discord)");
 }
 
-function startAudioInput(conn, guild) {
-  const s = ensureGuildState(guild.id);
+function startInput(conn, guild) {
+  const s = getState(guild.id);
   const receiver = conn.receiver;
 
-  // assina áudio de TODAS as pessoas que falarem no canal
-  receiver.speaking.on("start", async (userId) => {
-    try {
-      if (!s.ws || s.ws.readyState !== WebSocket.OPEN) return;
+  receiver.speaking.on("start", (userId) => {
+    // Só manda áudio quando o WS está pronto
+    if (!s.ws || s.ws.readyState !== WebSocket.OPEN) return;
 
-      const opusStream = receiver.subscribe(userId, {
-        end: { behavior: EndBehaviorType.AfterSilence, duration: 600 }
-      });
+    const opusStream = receiver.subscribe(userId, {
+      end: { behavior: EndBehaviorType.AfterSilence, duration: 700 },
+    });
 
-      const decoder = new prism.opus.Decoder({
-        rate: 48000,
-        channels: 1,
-        frameSize: 960
-      });
+    const decoder = new prism.opus.Decoder({
+      rate: 48000,
+      channels: 1,
+      frameSize: 960,
+    });
 
-      opusStream.pipe(decoder);
+    opusStream.pipe(decoder);
 
-      decoder.on("data", (pcm48k) => {
-        // converte e manda em chunk pro agent
-        const pcm16k = downsample48kTo16k(pcm48k);
-        const b64 = pcm16k.toString("base64");
+    decoder.on("data", (pcm48k) => {
+      // anti-eco simples: se você quiser “tudo sempre”, comenta este bloco depois.
+      // por enquanto, isso evita o bot re-alimentar a própria fala caso ele seja capturado.
+      // (não impede ele de ouvir o mestre e outros humanos.)
+      // if (userId === client.user.id) return;
+
+      const pcm16k = downsample48kTo16k(pcm48k);
+      const b64 = pcm16k.toString("base64");
+      try {
         s.ws.send(JSON.stringify({ user_audio_chunk: b64 }));
-      });
+      } catch {}
+    });
 
-      decoder.on("end", () => {});
-      decoder.on("error", () => {});
-    } catch (e) {
-      console.error("input stream erro:", e);
-    }
+    decoder.on("error", () => {});
   });
 
-  console.log("🎙️ Audio input iniciado (enviando voz pro agent)");
+  console.log("🎙️ Input iniciado (enviando áudio do Discord pro agent)");
 }
 
 client.once("ready", () => {
@@ -217,43 +231,44 @@ client.on("messageCreate", async (msg) => {
 
   if (content === "!join") {
     const member = await msg.guild.members.fetch(msg.author.id);
-    const voiceChannel = member?.voice?.channel;
-
-    if (!voiceChannel) {
-      await msg.reply("Entra num canal de voz e manda **!join** aqui 🙂");
+    const vc = member?.voice?.channel;
+    if (!vc) {
+      await msg.reply("Entra em um canal de voz e manda **!join**.");
       return;
     }
 
     const conn = joinVoiceChannel({
-      channelId: voiceChannel.id,
+      channelId: vc.id,
       guildId: msg.guild.id,
       adapterCreator: msg.guild.voiceAdapterCreator,
       selfDeaf: false,
-      selfMute: false
+      selfMute: false,
     });
 
-    await connectAgentWS(msg.guild);
+    const s = getState(msg.guild.id);
+    s.conn = conn;
 
-    startAudioOutput(conn, msg.guild);
-    startAudioInput(conn, msg.guild);
+    await connectAgent(msg.guild);
+    startOutput(conn, msg.guild);
+    startInput(conn, msg.guild);
 
-    await msg.reply(`🎙️ Entrei em **${voiceChannel.name}** e conectei no ElevenLabs Agent (sempre ligado).`);
+    await msg.reply(`🎙️ Entrei em **${vc.name}** e conectei no ElevenLabs Agent (sempre ligado).`);
     return;
   }
 
   if (content === "!leave") {
+    const s = getState(msg.guild.id);
+
     const conn = getVoiceConnection(msg.guild.id);
     if (conn) conn.destroy();
 
-    const s = ensureGuildState(msg.guild.id);
     if (s.ws) s.ws.close();
     s.ws = null;
 
-    if (s.audioOut) s.audioOut.end();
-    s.audioOut = null;
+    if (s.out) s.out.end();
+    s.out = null;
 
-    await msg.reply("👋 Saí do canal e fechei o Agent WS.");
-    return;
+    await msg.reply("👋 Saí do canal e fechei o Agent.");
   }
 });
 
