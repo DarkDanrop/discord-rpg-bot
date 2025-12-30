@@ -2,9 +2,8 @@ const { PassThrough } = require('stream');
 const WebSocket = require('ws');
 const prism = require('prism-media');
 
-try {
-  prism.FFmpeg.getPath = () => require('ffmpeg-static');
-} catch {}
+prism.FFmpeg.getPath = () => require('ffmpeg-static');
+
 const {
   EndBehaviorType,
   StreamType,
@@ -36,12 +35,14 @@ class AudioStream {
     this.ws = null;
     this.subscription = null;
     this.player = null;
+
+    this.inputDecoder = null;
     this.inputResampler = null;
-    this.responseStream = null;
+    this.opusStream = null;
+
+    this.outputBuffer = null;
     this.outputResampler = null;
     this.encoder = null;
-    this.opusStream = null;
-    this.inputDecoder = null;
   }
 
   async start() {
@@ -54,60 +55,12 @@ class AudioStream {
     this._connectWebSocket();
   }
 
-  _setupOutputPipeline() {
-    this.responseStream = new PassThrough();
-    this.responseStream.on('error', () => {});
-    this.outputResampler = new prism.FFmpeg({
-      args: [
-        '-analyseduration',
-        '0',
-        '-tune',
-        'zerolatency',
-        '-f',
-        's16le',
-        '-ar',
-        '16000',
-        '-ac',
-        '1',
-        '-i',
-        '-',
-        '-f',
-        's16le',
-        '-ar',
-        '48000',
-        '-ac',
-        '2',
-      ],
-    });
-
-    this.outputResampler.on('error', () => {});
-
-    this.encoder = new prism.opus.Encoder({ rate: 48000, channels: 2, frameSize: 960 });
-    this.encoder.on('error', () => {});
-
-    this.responseStream.pipe(this.outputResampler).pipe(this.encoder);
-
-    this.player = createAudioPlayer();
-    this.player.on('error', () => {});
-
-    const resource = createAudioResource(this.encoder, {
-      inputType: StreamType.Opus,
-    });
-
-    this.subscription = this.connection.subscribe(this.player);
-    this.player.play(resource);
-  }
-
   _setupInputPipeline() {
     this.opusStream = this.connection.receiver.subscribe(this.userId, {
       end: { behavior: EndBehaviorType.Manual },
     });
 
-    this.inputDecoder = new prism.opus.Decoder({
-      rate: 48000,
-      channels: 1,
-      frameSize: 960,
-    });
+    this.inputDecoder = new prism.opus.Decoder({ rate: 48000, channels: 1, frameSize: 960 });
     this.inputDecoder.on('error', () => {});
 
     this.inputResampler = new prism.FFmpeg({
@@ -132,19 +85,57 @@ class AudioStream {
         '1',
       ],
     });
-
     this.inputResampler.on('error', () => {});
-
-    const throttledLog = this._createThrottleLogger('🎤 Mic active', 100);
 
     this.opusStream
       .on('error', () => {})
       .pipe(this.inputDecoder)
       .pipe(this.inputResampler)
-      .on('data', (chunk) => {
-        throttledLog();
-        this._handleInputChunk(chunk);
-      });
+      .on('data', (chunk) => this._handleInputChunk(chunk));
+  }
+
+  _setupOutputPipeline() {
+    this.outputBuffer = new PassThrough();
+    this.outputBuffer.on('error', () => {});
+
+    this.outputResampler = new prism.FFmpeg({
+      args: [
+        '-analyseduration',
+        '0',
+        '-tune',
+        'zerolatency',
+        '-f',
+        's16le',
+        '-ar',
+        '16000',
+        '-ac',
+        '1',
+        '-i',
+        '-',
+        '-f',
+        's16le',
+        '-ar',
+        '48000',
+        '-ac',
+        '2',
+      ],
+    });
+    this.outputResampler.on('error', () => {});
+
+    this.encoder = new prism.opus.Encoder({ rate: 48000, channels: 2, frameSize: 960 });
+    this.encoder.on('error', () => {});
+
+    this.outputBuffer.pipe(this.outputResampler).pipe(this.encoder);
+
+    this.player = createAudioPlayer();
+    this.player.on('error', () => {});
+
+    const resource = createAudioResource(this.encoder, {
+      inputType: StreamType.Opus,
+    });
+
+    this.subscription = this.connection.subscribe(this.player);
+    this.player.play(resource);
   }
 
   _connectWebSocket() {
@@ -191,33 +182,20 @@ class AudioStream {
     try {
       const parsed = JSON.parse(data.toString());
       const payload = parsed?.data ?? parsed;
-
-      const audioBase64 =
-        payload?.audio_event?.audio_base_64 || payload?.audio_base_64;
+      const audioBase64 = payload?.audio_event?.audio_base_64 || payload?.audio_base_64;
 
       if (audioBase64) {
-        this.responseStream?.write(Buffer.from(audioBase64, 'base64'));
-        this.log.info?.('✅ Audio received');
+        this.outputBuffer?.write(Buffer.from(audioBase64, 'base64'));
+        this.log.info?.('✅ Audio Chunk Received');
         return;
       }
 
       if (payload?.type === 'ping') {
         return;
       }
-
     } catch (err) {
       this.log.warn?.('Mensagem inesperada do WebSocket', err?.message || err);
     }
-  }
-
-  _createThrottleLogger(message, interval = 100) {
-    let count = 0;
-    return () => {
-      count += 1;
-      if (count % interval === 1) {
-        this.log.info?.(message);
-      }
-    };
   }
 
   stop(reason) {
@@ -227,19 +205,22 @@ class AudioStream {
     this.log.info?.(`Encerrando AudioStream${reason ? `: ${reason}` : ''}`);
 
     try {
-      this.inputDecoder?.destroy();
-    } catch {}
-    try {
       this.opusStream?.destroy();
     } catch {}
+    this.opusStream = null;
+    try {
+      this.inputDecoder?.destroy();
+    } catch {}
+    this.inputDecoder = null;
     try {
       this.inputResampler?.destroy();
     } catch {}
     this.inputResampler = null;
+
     try {
-      this.responseStream?.destroy();
+      this.outputBuffer?.destroy();
     } catch {}
-    this.responseStream = null;
+    this.outputBuffer = null;
     try {
       this.outputResampler?.destroy();
     } catch {}
@@ -248,6 +229,7 @@ class AudioStream {
       this.encoder?.destroy();
     } catch {}
     this.encoder = null;
+
     try {
       this.player?.stop();
     } catch {}
