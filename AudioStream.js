@@ -1,5 +1,3 @@
-const ffmpegPath = require('ffmpeg-static');
-const { spawn } = require('child_process');
 const { PassThrough, Transform } = require('node:stream');
 const WebSocket = require('ws');
 const prism = require('prism-media');
@@ -34,9 +32,8 @@ class AudioStream {
     this.ws = null;
     this.subscription = null;
     this.player = null;
-    this.ffmpegProc = null;
+    this.ffmpegStream = null;
     this.ffmpegInputBuffer = null;
-    this.outputStream = null;
     this.opusStream = null;
     this.inputDecoder = null;
     this.downsampleStream = null;
@@ -53,44 +50,46 @@ class AudioStream {
   }
 
   _setupOutputPipeline() {
-    this.ffmpegProc = spawn(ffmpegPath, [
-      '-analyseduration',
-      '0',
-      '-tune',
-      'zerolatency',
-      '-flags',
-      'low_delay',
-      '-f',
-      's16le',
-      '-ar',
-      '16000',
-      '-ac',
-      '1',
-      '-i',
-      '-',
-      '-f',
-      's16le',
-      '-ar',
-      '48000',
-      '-ac',
-      '2',
-      'pipe:1',
-    ]);
+    try {
+      prism.FFmpeg.getPath = () => require('ffmpeg-static');
+    } catch {}
 
-    this.ffmpegProc.on('error', (err) => {
+    this.ffmpegInputBuffer = new PassThrough();
+    this.ffmpegStream = new prism.FFmpeg({
+      args: [
+        '-analyseduration',
+        '0',
+        '-tune',
+        'zerolatency',
+        '-f',
+        's16le',
+        '-ar',
+        '16000',
+        '-ac',
+        '1',
+        '-i',
+        '-',
+        '-f',
+        's16le',
+        '-ar',
+        '48000',
+        '-ac',
+        '2',
+      ],
+    });
+
+    this.ffmpegStream.on('error', (err) => {
       this.log.error?.('Erro no FFmpeg:', err?.message || err);
     });
 
-    this.ffmpegInputBuffer = new PassThrough();
-    this.ffmpegInputBuffer.pipe(this.ffmpegProc.stdin);
-
-    this.outputStream = new PassThrough();
-    this.ffmpegProc.stdout.pipe(this.outputStream);
+    this.ffmpegInputBuffer.pipe(this.ffmpegStream);
 
     this.player = createAudioPlayer();
-    this.player.on('error', console.error);
+    this.player.on('error', (err) => {
+      this.log.error?.('Erro no player de áudio:', err?.message || err);
+    });
 
-    const resource = createAudioResource(this.outputStream, {
+    const resource = createAudioResource(this.ffmpegStream, {
       inputType: StreamType.Raw,
     });
 
@@ -181,26 +180,27 @@ class AudioStream {
     }
   }
 
-  _handleWebSocketMessage(data, ffmpegProc = this.ffmpegProc) {
+  _handleWebSocketMessage(data) {
     try {
       const parsed = JSON.parse(data.toString());
       const payload = parsed?.data ?? parsed;
+
+      const audioBase64 =
+        payload?.audio_event?.audio_base_64 || payload?.audio_base_64;
+
+      if (audioBase64) {
+        if (this.ffmpegInputBuffer?.writable) {
+          this.ffmpegInputBuffer.write(Buffer.from(audioBase64, 'base64'));
+          this.log.info?.('✅ Received Audio Chunk of size:', audioBase64.length);
+        }
+        return;
+      }
 
       if (payload?.type === 'ping') {
         this.log.info?.('Ping');
         return;
       }
 
-      if (payload?.type !== 'audio') return;
-
-      const audioBase64 = payload?.audio_event?.audio_base_64;
-
-      if (!audioBase64) return;
-
-      if (this.ffmpegInputBuffer?.writable && ffmpegProc?.stdin?.writable) {
-        this.ffmpegInputBuffer.write(Buffer.from(audioBase64, 'base64'));
-        this.log.info?.('✅ Audio Chunk Processed');
-      }
     } catch (err) {
       this.log.warn?.('Mensagem inesperada do WebSocket', err?.message || err);
     }
@@ -226,15 +226,9 @@ class AudioStream {
     } catch {}
     this.ffmpegInputBuffer = null;
     try {
-      this.outputStream?.destroy();
+      this.ffmpegStream?.destroy();
     } catch {}
-    this.outputStream = null;
-    try {
-      this.ffmpegProc?.stdin?.destroy();
-      this.ffmpegProc?.stdout?.destroy();
-      this.ffmpegProc?.kill('SIGTERM');
-    } catch {}
-    this.ffmpegProc = null;
+    this.ffmpegStream = null;
     try {
       this.player?.stop();
     } catch {}
