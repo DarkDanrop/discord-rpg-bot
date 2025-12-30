@@ -37,12 +37,13 @@ class AudioStream {
     this.player = null;
 
     this.inputDecoder = null;
-    this.inputResampler = null;
     this.opusStream = null;
 
+    this.lastInputLog = 0;
+    this.lastOutputLog = 0;
+
     this.outputBuffer = null;
-    this.outputResampler = null;
-    this.encoder = null;
+    this.resampler = null;
   }
 
   async start() {
@@ -61,44 +62,28 @@ class AudioStream {
     });
 
     this.inputDecoder = new prism.opus.Decoder({ rate: 48000, channels: 1, frameSize: 960 });
-    this.inputDecoder.on('error', () => {});
-
-    this.inputResampler = new prism.FFmpeg({
-      args: [
-        '-analyseduration',
-        '0',
-        '-tune',
-        'zerolatency',
-        '-f',
-        's16le',
-        '-ar',
-        '48000',
-        '-ac',
-        '1',
-        '-i',
-        '-',
-        '-f',
-        's16le',
-        '-ar',
-        '16000',
-        '-ac',
-        '1',
-      ],
+    this.inputDecoder.on('error', () => {
+      this.log.warn?.('⚠️ Decoder glitch ignored');
     });
-    this.inputResampler.on('error', () => {});
 
-    this.opusStream
-      .on('error', () => {})
-      .pipe(this.inputDecoder)
-      .pipe(this.inputResampler)
-      .on('data', (chunk) => this._handleInputChunk(chunk));
+    this.opusStream.on('error', () => {});
+    this.opusStream.pipe(this.inputDecoder);
+
+    this.inputDecoder.on('data', (chunk) => {
+      try {
+        const downsampled = this._downsample(chunk);
+        this._handleInputChunk(downsampled);
+      } catch (err) {
+        this.log.warn?.('Erro ao processar áudio de entrada', err?.message || err);
+      }
+    });
   }
 
   _setupOutputPipeline() {
     this.outputBuffer = new PassThrough();
     this.outputBuffer.on('error', () => {});
 
-    this.outputResampler = new prism.FFmpeg({
+    this.resampler = new prism.FFmpeg({
       args: [
         '-analyseduration',
         '0',
@@ -120,18 +105,15 @@ class AudioStream {
         '2',
       ],
     });
-    this.outputResampler.on('error', () => {});
+    this.resampler.on('error', () => {});
 
-    this.encoder = new prism.opus.Encoder({ rate: 48000, channels: 2, frameSize: 960 });
-    this.encoder.on('error', () => {});
-
-    this.outputBuffer.pipe(this.outputResampler).pipe(this.encoder);
+    this.outputBuffer.pipe(this.resampler);
 
     this.player = createAudioPlayer();
     this.player.on('error', () => {});
 
-    const resource = createAudioResource(this.encoder, {
-      inputType: StreamType.Opus,
+    const resource = createAudioResource(this.resampler, {
+      inputType: StreamType.Raw,
     });
 
     this.subscription = this.connection.subscribe(this.player);
@@ -169,12 +151,20 @@ class AudioStream {
   }
 
   _handleInputChunk(chunk) {
+    if (!chunk?.length) return;
+
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(
         JSON.stringify({
           user_audio_chunk: chunk.toString('base64'),
         }),
       );
+
+      const now = Date.now();
+      if (now - this.lastInputLog > 1000) {
+        this.log.info?.('🎤 Mic OK');
+        this.lastInputLog = now;
+      }
     }
   }
 
@@ -186,7 +176,11 @@ class AudioStream {
 
       if (audioBase64) {
         this.outputBuffer?.write(Buffer.from(audioBase64, 'base64'));
-        this.log.info?.('✅ Audio Chunk Received');
+        const now = Date.now();
+        if (now - this.lastOutputLog > 1000) {
+          this.log.info?.('✅ Output Audio');
+          this.lastOutputLog = now;
+        }
         return;
       }
 
@@ -196,6 +190,23 @@ class AudioStream {
     } catch (err) {
       this.log.warn?.('Mensagem inesperada do WebSocket', err?.message || err);
     }
+  }
+
+  _downsample(chunk) {
+    const sampleCount = Math.floor(chunk.length / 2);
+    const outputSamples = Math.floor(sampleCount / 3);
+    if (outputSamples <= 0) {
+      return Buffer.alloc(0);
+    }
+
+    const output = Buffer.allocUnsafe(outputSamples * 2);
+
+    for (let i = 0; i < outputSamples; i += 1) {
+      const value = chunk.readInt16LE(i * 3 * 2);
+      output.writeInt16LE(value, i * 2);
+    }
+
+    return output;
   }
 
   stop(reason) {
@@ -212,23 +223,15 @@ class AudioStream {
       this.inputDecoder?.destroy();
     } catch {}
     this.inputDecoder = null;
-    try {
-      this.inputResampler?.destroy();
-    } catch {}
-    this.inputResampler = null;
 
     try {
       this.outputBuffer?.destroy();
     } catch {}
     this.outputBuffer = null;
     try {
-      this.outputResampler?.destroy();
+      this.resampler?.destroy();
     } catch {}
-    this.outputResampler = null;
-    try {
-      this.encoder?.destroy();
-    } catch {}
-    this.encoder = null;
+    this.resampler = null;
 
     try {
       this.player?.stop();
