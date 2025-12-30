@@ -1,4 +1,4 @@
-const { Transform } = require('node:stream');
+const { PassThrough, Transform } = require('node:stream');
 const { spawn } = require('node:child_process');
 const WebSocket = require('ws');
 const prism = require('prism-media');
@@ -39,6 +39,7 @@ class AudioStream {
     this.opusStream = null;
     this.inputDecoder = null;
     this.downsampleStream = null;
+    this.outputStream = null;
   }
 
   async start() {
@@ -104,7 +105,10 @@ class AudioStream {
     this.player = createAudioPlayer();
     this.player.on('error', console.error);
 
-    const resource = createAudioResource(this.ffmpegProcess.stdout, {
+    this.outputStream = new PassThrough();
+    this.ffmpegProcess.stdout.pipe(this.outputStream);
+
+    const resource = createAudioResource(this.outputStream, {
       inputType: StreamType.Raw,
     });
 
@@ -205,10 +209,17 @@ class AudioStream {
 
       const base64Audio = parsed?.data?.audio_event?.audio_base_64;
 
-      if (base64Audio && this.aiInputStream) {
+      if (base64Audio) {
         const decodedBuffer = Buffer.from(base64Audio, 'base64');
         console.log('🔊 Buffered Audio Chunk', decodedBuffer.length);
-        this.aiInputStream.write(decodedBuffer);
+
+        const ffmpegStdin = this.ffmpegProcess?.stdin;
+        if (ffmpegStdin?.writable) {
+          ffmpegStdin.write(decodedBuffer);
+          console.log('📝 Wrote to FFmpeg stdin:', decodedBuffer.length);
+        } else {
+          this.log.warn?.('FFmpeg stdin not writable; audio chunk dropped');
+        }
       }
     } catch (err) {
       this.log.warn?.('Mensagem inesperada do WebSocket', err?.message || err);
@@ -236,6 +247,9 @@ class AudioStream {
     this.ffmpegProcess = null;
     try {
       this.aiInputStream?.destroy();
+    } catch {}
+    try {
+      this.outputStream?.destroy();
     } catch {}
     try {
       this.player?.stop();
