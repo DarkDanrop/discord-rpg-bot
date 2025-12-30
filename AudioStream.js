@@ -34,6 +34,8 @@ class AudioStream {
     this.subscription = null;
     this.player = null;
     this.outputFFmpeg = null;
+    this.responseStream = null;
+    this.upsampler = null;
     this.aiInputStream = null;
     this.opusStream = null;
     this.inputDecoder = null;
@@ -51,9 +53,10 @@ class AudioStream {
   }
 
   _setupOutputPipeline() {
-    this.aiInputStream = new PassThrough();
+    this.responseStream = new PassThrough();
+    this.aiInputStream = this.responseStream;
 
-    this.outputFFmpeg = new prism.FFmpeg({
+    this.upsampler = new prism.FFmpeg({
       command: ffmpegPath,
       args: [
         '-f',
@@ -73,11 +76,13 @@ class AudioStream {
       ],
     });
 
+    this.outputFFmpeg = this.upsampler;
+
     this.outputFFmpeg.on('error', (err) => {
       this.log.warn?.('⚠️ FFmpeg (output) error:', err?.message || err);
     });
 
-    const speakerStream = this.aiInputStream.pipe(this.outputFFmpeg);
+    const speakerStream = this.responseStream.pipe(this.upsampler);
 
     this.player = createAudioPlayer();
     const resource = createAudioResource(speakerStream, {
@@ -146,6 +151,10 @@ class AudioStream {
 
     this.ws.on('message', (data) => this._handleWebSocketMessage(data));
 
+    this.ws.on('ping', () => {
+      this.log.info?.('Ping received');
+    });
+
     this.ws.on('close', (code, reason) => {
       const readableReason = reason?.toString?.() || '';
       this.stop(`WebSocket fechado (${code}) ${readableReason}`.trim());
@@ -171,11 +180,16 @@ class AudioStream {
   _handleWebSocketMessage(data) {
     try {
       const parsed = JSON.parse(data.toString());
+      const eventType = parsed?.type ?? parsed?.data?.type;
+
+      console.log('📩 WS Message Type:', eventType);
+
       const base64Audio = parsed?.data?.audio_event?.audio_base_64;
 
       if (base64Audio) {
         const buffer = Buffer.from(base64Audio, 'base64');
-        this.aiInputStream?.write(buffer);
+        this.responseStream?.write(buffer);
+        console.log('🔊 Audio chunk written to Speaker');
       }
     } catch (err) {
       this.log.warn?.('Mensagem inesperada do WebSocket', err?.message || err);
