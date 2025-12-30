@@ -41,10 +41,14 @@ function startRealtimeBridge(connection, userId, options) {
   const ffmpeg = new prism.FFmpeg({
     command: ffmpegPath,
     args: [
-      '-analyzeduration',
-      '0',
-      '-loglevel',
-      '0',
+      '-f',
+      's16le',
+      '-ar',
+      '48000',
+      '-ac',
+      '1',
+      '-i',
+      '-',
       '-f',
       's16le',
       '-ar',
@@ -56,10 +60,10 @@ function startRealtimeBridge(connection, userId, options) {
 
   const pcmStream = opusStream.pipe(decoder);
   const downsampledStream = pcmStream.pipe(ffmpeg);
-  const playbackStream = new PassThrough();
+  const speakerStream = new PassThrough();
 
   const player = createAudioPlayer();
-  const resource = createAudioResource(playbackStream, {
+  const resource = createAudioResource(speakerStream, {
     inputType: StreamType.Raw,
   });
 
@@ -78,7 +82,7 @@ function startRealtimeBridge(connection, userId, options) {
     try { opusStream.destroy(); } catch {}
     try { decoder.destroy(); } catch {}
     try { ffmpeg.destroy(); } catch {}
-    try { playbackStream.end(); } catch {}
+    try { speakerStream.end(); } catch {}
     try { player.stop(); } catch {}
     try { subscription.unsubscribe(); } catch {}
     try { ws?.close(); } catch {}
@@ -92,7 +96,7 @@ function startRealtimeBridge(connection, userId, options) {
   }
 
   function pushIncomingAudio(buffer) {
-    playbackStream.write(buffer);
+    speakerStream.write(buffer);
   }
 
   downsampledStream.on('data', handlePcmData);
@@ -101,7 +105,10 @@ function startRealtimeBridge(connection, userId, options) {
     stop('erro no opusStream');
   });
   decoder.on('error', (err) => {
-    log.warn?.('Erro ignorado no decoder:', err?.message || err);
+    log.error?.('Erro no decoder:', err?.message || err);
+  });
+  ffmpeg.on('error', (err) => {
+    log.error?.('Erro no ffmpeg:', err?.message || err);
   });
 
   entersState(connection, VoiceConnectionStatus.Ready, 20_000)
@@ -127,10 +134,7 @@ function startRealtimeBridge(connection, userId, options) {
 
         try {
           const parsed = JSON.parse(data.toString());
-          const base64Audio =
-            parsed?.audio_event?.audio_base_64 ||
-            parsed?.audio_event?.audio_base64 ||
-            parsed?.audio?.base64;
+          const base64Audio = parsed?.data?.audio_event?.audio_base_64;
 
           if (base64Audio) {
             pushIncomingAudio(Buffer.from(base64Audio, 'base64'));
