@@ -38,6 +38,7 @@ class AudioStream {
     this.player = null;
     this.ffmpegStream = null;
     this.inputStream = null;
+    this.encoder = null;
     this.opusStream = null;
     this.inputDecoder = null;
     this.downsampleStream = null;
@@ -61,8 +62,6 @@ class AudioStream {
         '0',
         '-tune',
         'zerolatency',
-        '-flags',
-        'low_delay',
         '-f',
         's16le',
         '-ar',
@@ -71,16 +70,12 @@ class AudioStream {
         '1',
         '-i',
         '-',
-        '-c:a',
-        'libopus',
+        '-f',
+        's16le',
         '-ar',
         '48000',
         '-ac',
         '2',
-        '-b:a',
-        '96k',
-        '-f',
-        'ogg',
       ],
     });
 
@@ -88,19 +83,29 @@ class AudioStream {
       this.log.error?.('Erro no FFmpeg:', err?.message || err);
     });
 
-    this.ffmpegStream.on('data', (c) => {
-      console.log('🟢 Outputting Opus chunk:', c.length);
+    this.encoder = new prism.opus.Encoder({ rate: 48000, channels: 2, frameSize: 960 });
+
+    let packetCount = 0;
+    this.encoder.on('data', () => {
+      packetCount += 1;
+      if (packetCount === 1 || packetCount % 100 === 0) {
+        this.log.info?.('🟢 Encoded Opus packet ready');
+      }
     });
 
-    this.inputStream.pipe(this.ffmpegStream);
+    this.encoder.on('error', (err) => {
+      this.log.error?.('Erro no Encoder Opus:', err?.message || err);
+    });
+
+    this.inputStream.pipe(this.ffmpegStream).pipe(this.encoder);
 
     this.player = createAudioPlayer();
     this.player.on('error', (err) => {
       this.log.error?.('Erro no player de áudio:', err?.message || err);
     });
 
-    const resource = createAudioResource(this.ffmpegStream, {
-      inputType: StreamType.OggOpus,
+    const resource = createAudioResource(this.encoder, {
+      inputType: StreamType.Opus,
     });
 
     this.subscription = this.connection.subscribe(this.player);
@@ -240,6 +245,10 @@ class AudioStream {
       this.ffmpegStream?.destroy();
     } catch {}
     this.ffmpegStream = null;
+    try {
+      this.encoder?.destroy();
+    } catch {}
+    this.encoder = null;
     try {
       this.player?.stop();
     } catch {}
