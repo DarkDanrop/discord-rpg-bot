@@ -107,14 +107,30 @@ class AudioStream {
     });
     this.resampler.on('error', () => {});
 
+    if (this.resampler.process?.stderr) {
+      this.resampler.process.stderr.on('data', (d) => {
+        const log = d.toString();
+        if (log.includes('Error') || log.includes('Warning')) {
+          console.log('🔴 FFmpeg Stderr:', log);
+        }
+      });
+    }
+
     this.outputBuffer.pipe(this.resampler);
+    this.outputBuffer.on('data', () => process.stdout.write('.'));
+    this.resampler.on('data', () => process.stdout.write('*'));
 
     this.player = createAudioPlayer();
+    this.player.on('stateChange', (oldState, newState) => {
+      console.log(`📀 Player State: ${oldState.status} -> ${newState.status}`);
+    });
     this.player.on('error', () => {});
 
     const resource = createAudioResource(this.resampler, {
       inputType: StreamType.Raw,
     });
+
+    resource.playStream?.on?.('error', (e) => console.log('❌ Resource Error:', e));
 
     this.subscription = this.connection.subscribe(this.player);
     this.player.play(resource);
