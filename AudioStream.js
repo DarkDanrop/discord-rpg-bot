@@ -42,9 +42,8 @@ class AudioStream {
     this.lastInputLog = 0;
     this.lastOutputLog = 0;
 
-    this.liveStream = null;
-    this.resampler = null;
-    this.ffmpegOutput = null;
+    this.currentResponseStream = null;
+    this.silenceTimeout = null;
   }
 
   async start() {
@@ -81,44 +80,6 @@ class AudioStream {
   }
 
   _setupOutputPipeline() {
-    this.liveStream = new PassThrough({ highWaterMark: 1024 * 1024 });
-    this.liveStream.on('error', () => {});
-
-    const args = [
-      '-f',
-      's16le',
-      '-ar',
-      '16000',
-      '-ac',
-      '1',
-      '-i',
-      '-',
-      '-f',
-      's16le',
-      '-ar',
-      '48000',
-      '-ac',
-      '2',
-    ];
-
-    this.resampler = new prism.FFmpeg({ args });
-    this.resampler.on('error', () => {});
-
-    this.liveStream.pipe(this.resampler);
-    this.ffmpegOutput = this.resampler;
-
-    if (this.resampler.process?.stderr) {
-      this.resampler.process.stderr.on('data', (d) => {
-        const log = d.toString();
-        if (log.includes('Error') || log.includes('Warning')) {
-          console.log('🔴 FFmpeg Stderr:', log);
-        }
-      });
-    }
-
-    this.liveStream.on('data', () => process.stdout.write('.'));
-    this.resampler.on('data', () => process.stdout.write('*'));
-
     this.player = createAudioPlayer();
     this.player.on('stateChange', (oldState, newState) => {
       console.log(`📀 Player State: ${oldState.status} -> ${newState.status}`);
@@ -185,16 +146,7 @@ class AudioStream {
       const audioBase64 = payload?.audio_event?.audio_base_64 || payload?.audio_base_64;
 
       if (audioBase64) {
-        this.liveStream?.write(Buffer.from(audioBase64, 'base64'));
-
-        if (this.player?.state?.status === 'idle' && this.ffmpegOutput) {
-          console.log('🔄 Player Waking Up');
-          const resource = createAudioResource(this.ffmpegOutput, {
-            inputType: StreamType.Raw,
-          });
-          resource.playStream?.on?.('error', (e) => console.log('❌ Resource Error:', e));
-          this.player.play(resource);
-        }
+        this._writeOutputAudio(Buffer.from(audioBase64, 'base64'));
 
         const now = Date.now();
         if (now - this.lastOutputLog > 1000) {
@@ -210,6 +162,73 @@ class AudioStream {
     } catch (err) {
       this.log.warn?.('Mensagem inesperada do WebSocket', err?.message || err);
     }
+  }
+
+  _writeOutputAudio(buffer) {
+    if (!buffer?.length) return;
+
+    const streamEnded =
+      !this.currentResponseStream ||
+      this.currentResponseStream.destroyed ||
+      this.currentResponseStream.writableEnded;
+
+    if (streamEnded) {
+      this.currentResponseStream = new PassThrough({ highWaterMark: 1024 * 1024 });
+      this.currentResponseStream.on('error', () => {});
+
+      const args = [
+        '-f',
+        's16le',
+        '-ar',
+        '16000',
+        '-ac',
+        '1',
+        '-i',
+        '-',
+        '-f',
+        's16le',
+        '-ar',
+        '48000',
+        '-ac',
+        '2',
+      ];
+
+      const ffmpeg = new prism.FFmpeg({ args });
+      ffmpeg.on('error', (err) => this.log.warn?.('⚠️ FFmpeg error', err?.message || err));
+
+      this.currentResponseStream.pipe(ffmpeg);
+
+      if (ffmpeg.process?.stderr) {
+        ffmpeg.process.stderr.on('data', (d) => {
+          const log = d.toString();
+          if (log.includes('Error') || log.includes('Warning')) {
+            console.log('🔴 FFmpeg Stderr:', log);
+          }
+        });
+      }
+
+      const resource = createAudioResource(ffmpeg, {
+        inputType: StreamType.Raw,
+      });
+      resource.playStream?.on?.('error', (e) => console.log('❌ Resource Error:', e));
+
+      this.player?.play(resource);
+      console.log('🗣️ Started new speech segment');
+    }
+
+    this.currentResponseStream.write(buffer);
+
+    if (this.silenceTimeout) {
+      clearTimeout(this.silenceTimeout);
+    }
+
+    this.silenceTimeout = setTimeout(() => {
+      try {
+        this.currentResponseStream?.end();
+      } catch {}
+      this.currentResponseStream = null;
+      console.log('🤫 Speech segment ended');
+    }, 1000);
   }
 
   _downsample(chunk) {
@@ -245,14 +264,13 @@ class AudioStream {
     this.inputDecoder = null;
 
     try {
-      this.liveStream?.destroy();
+      this.currentResponseStream?.destroy();
     } catch {}
-    this.liveStream = null;
-    try {
-      this.resampler?.destroy();
-    } catch {}
-    this.resampler = null;
-    this.ffmpegOutput = null;
+    this.currentResponseStream = null;
+    if (this.silenceTimeout) {
+      clearTimeout(this.silenceTimeout);
+      this.silenceTimeout = null;
+    }
 
     try {
       this.player?.stop();
