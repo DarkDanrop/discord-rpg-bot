@@ -1,4 +1,5 @@
 const { PassThrough, Transform } = require('node:stream');
+const { spawn } = require('node:child_process');
 const WebSocket = require('ws');
 const prism = require('prism-media');
 const {
@@ -9,6 +10,7 @@ const {
   createAudioResource,
   entersState,
 } = require('@discordjs/voice');
+const ffmpegPath = require('ffmpeg-static');
 
 class AudioStream {
   constructor(connection, userId, options = {}) {
@@ -34,7 +36,7 @@ class AudioStream {
     this.player = null;
     this.aiResponseStream = null;
     this.aiInputStream = null;
-    this.ffmpegStream = null;
+    this.ffmpegProcess = null;
     this.opusStream = null;
     this.inputDecoder = null;
     this.downsampleStream = null;
@@ -54,38 +56,46 @@ class AudioStream {
     this.aiResponseStream = new PassThrough();
     this.aiResponseStream.on('error', console.error);
 
-    this.ffmpegStream = new prism.FFmpeg({
-      args: [
-        '-analyseduration',
-        '0',
-        '-tune',
-        'zerolatency',
-        '-f',
-        's16le',
-        '-ar',
-        '16000',
-        '-ac',
-        '1',
-        '-i',
-        '-',
-        '-f',
-        's16le',
-        '-ar',
-        '48000',
-        '-ac',
-        '2',
-      ],
+    const args = [
+      '-analyseduration',
+      '0',
+      '-tune',
+      'zerolatency',
+      '-f',
+      's16le',
+      '-ar',
+      '16000',
+      '-ac',
+      '1',
+      '-i',
+      '-',
+      '-f',
+      's16le',
+      '-ar',
+      '48000',
+      '-ac',
+      '2',
+    ];
+
+    if (!ffmpegPath) {
+      throw new Error('ffmpeg-static não forneceu um caminho válido para o binário FFmpeg.');
+    }
+
+    this.ffmpegProcess = spawn(ffmpegPath, args);
+    this.ffmpegProcess.on('error', (err) => {
+      this.log.error?.('Erro no FFmpeg:', err?.message || err);
+    });
+    this.ffmpegProcess.stdin.on('error', (err) => {
+      this.log.error?.('Erro no stdin do FFmpeg:', err?.message || err);
     });
 
-    this.ffmpegStream.on('error', console.error);
-
-    this.aiResponseStream.pipe(this.ffmpegStream);
+    this.aiResponseStream.pipe(this.ffmpegProcess.stdin);
     this.aiInputStream = this.aiResponseStream;
 
     this.player = createAudioPlayer();
     this.player.on('error', console.error);
 
-    const resource = createAudioResource(this.ffmpegStream, {
+    const resource = createAudioResource(this.ffmpegProcess.stdout, {
       inputType: StreamType.Raw,
     });
 
@@ -212,10 +222,14 @@ class AudioStream {
       this.opusStream?.destroy();
     } catch {}
     try {
-      this.ffmpegStream?.destroy();
+      this.ffmpegProcess?.kill();
     } catch {}
+    this.ffmpegProcess = null;
     try {
       this.aiInputStream?.destroy();
+    } catch {}
+    try {
+      this.aiResponseStream?.destroy();
     } catch {}
     try {
       this.player?.stop();
