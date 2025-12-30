@@ -1,4 +1,4 @@
-const { PassThrough, Transform } = require('node:stream');
+const { Transform } = require('node:stream');
 const { spawn } = require('node:child_process');
 const WebSocket = require('ws');
 const prism = require('prism-media');
@@ -34,7 +34,6 @@ class AudioStream {
     this.ws = null;
     this.subscription = null;
     this.player = null;
-    this.aiResponseStream = null;
     this.aiInputStream = null;
     this.ffmpegProcess = null;
     this.opusStream = null;
@@ -53,14 +52,7 @@ class AudioStream {
   }
 
   _setupOutputPipeline() {
-    this.aiResponseStream = new PassThrough();
-    this.aiResponseStream.on('error', console.error);
-
     const args = [
-      '-analyseduration',
-      '0',
-      '-tune',
-      'zerolatency',
       '-f',
       's16le',
       '-ar',
@@ -68,29 +60,46 @@ class AudioStream {
       '-ac',
       '1',
       '-i',
-      '-',
+      'pipe:0',
       '-f',
       's16le',
       '-ar',
       '48000',
       '-ac',
       '2',
+      'pipe:1',
     ];
 
     if (!ffmpegPath) {
       throw new Error('ffmpeg-static não forneceu um caminho válido para o binário FFmpeg.');
     }
 
-    this.ffmpegProcess = spawn(ffmpegPath, args);
+    this.ffmpegProcess = spawn(ffmpegPath, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     this.ffmpegProcess.on('error', (err) => {
       this.log.error?.('Erro no FFmpeg:', err?.message || err);
     });
+    this.ffmpegProcess.stderr.on('data', (data) => {
+      const message = data?.toString?.();
+      if (message) {
+        console.log('FFmpeg Debug:', message.trimEnd());
+      }
+    });
+    this.ffmpegProcess.on('close', (code, signal) => {
+      const codeInfo = Number.isInteger(code) ? `code ${code}` : 'code N/A';
+      const signalInfo = signal ? `, signal ${signal}` : '';
+      this.log.info?.(`FFmpeg process closed (${codeInfo}${signalInfo})`);
+    });
     this.ffmpegProcess.stdin.on('error', (err) => {
+      if (err?.code === 'EPIPE') {
+        this.log.warn?.('FFmpeg stdin closed (EPIPE)');
+        return;
+      }
       this.log.error?.('Erro no stdin do FFmpeg:', err?.message || err);
     });
 
-    this.aiResponseStream.pipe(this.ffmpegProcess.stdin);
-    this.aiInputStream = this.aiResponseStream;
+    this.aiInputStream = this.ffmpegProcess.stdin;
 
     this.player = createAudioPlayer();
     this.player.on('error', console.error);
@@ -227,9 +236,6 @@ class AudioStream {
     this.ffmpegProcess = null;
     try {
       this.aiInputStream?.destroy();
-    } catch {}
-    try {
-      this.aiResponseStream?.destroy();
     } catch {}
     try {
       this.player?.stop();
