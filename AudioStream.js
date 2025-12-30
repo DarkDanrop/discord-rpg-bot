@@ -1,4 +1,4 @@
-const { Transform } = require('node:stream');
+const { PassThrough, Transform } = require('node:stream');
 const { spawn } = require('node:child_process');
 const WebSocket = require('ws');
 const prism = require('prism-media');
@@ -59,6 +59,10 @@ class AudioStream {
       '16000',
       '-ac',
       '1',
+      '-fflags',
+      'nobuffer',
+      '-flags',
+      'low_delay',
       '-i',
       'pipe:0',
       '-f',
@@ -99,12 +103,18 @@ class AudioStream {
       this.log.error?.('Erro no stdin do FFmpeg:', err?.message || err);
     });
 
+    // Prime the stream with one second of silence to keep the Discord player alive.
+    this.ffmpegProcess.stdin.write(Buffer.alloc(32_000, 0));
+
     this.aiInputStream = this.ffmpegProcess.stdin;
 
     this.player = createAudioPlayer();
     this.player.on('error', console.error);
 
-    const resource = createAudioResource(this.ffmpegProcess.stdout, {
+    const ffmpegOutput = new PassThrough();
+    this.ffmpegProcess.stdout.pipe(ffmpegOutput);
+
+    const resource = createAudioResource(ffmpegOutput, {
       inputType: StreamType.Raw,
     });
 
