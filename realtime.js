@@ -66,7 +66,7 @@ function startRealtimeBridge(connection, userId, options) {
     if (ws?.readyState === WebSocket.OPEN) {
       pcmChunkCount += 1;
       if (pcmChunkCount <= 3 || pcmChunkCount % 50 === 0) {
-        console.log('🎤 Sending chunk to AI');
+        console.log('🎤 Sending chunk...');
       }
 
       const payload = { user_audio_chunk: chunk.toString('base64') };
@@ -106,14 +106,11 @@ function startRealtimeBridge(connection, userId, options) {
     });
 
     decoder.on('error', (err) => {
-      log.error?.('Erro no decoder:', err?.message || err);
-      if (stopped) return;
-      destroyPipeline('erro no decoder');
-      createPipeline();
+      log.warn?.('⚠️ Packet dropped (decoder error):', err?.message || err);
     });
 
     ffmpeg.on('error', (err) => {
-      log.error?.('Erro no ffmpeg:', err?.message || err);
+      log.warn?.('⚠️ FFmpeg reported an error:', err?.message || err);
     });
 
     const downsampledStream = opusStream.pipe(decoder).pipe(ffmpeg);
