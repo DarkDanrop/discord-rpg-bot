@@ -1,4 +1,4 @@
-const { PassThrough } = require('node:stream');
+const { PassThrough, Transform } = require('node:stream');
 const WebSocket = require('ws');
 const prism = require('prism-media');
 const ffmpegPath = require('ffmpeg-static');
@@ -37,7 +37,7 @@ class AudioStream {
     this.aiInputStream = null;
     this.opusStream = null;
     this.inputDecoder = null;
-    this.inputFFmpeg = null;
+    this.downsampleStream = null;
   }
 
   async start() {
@@ -99,37 +99,27 @@ class AudioStream {
       frameSize: 960,
     });
 
-    this.inputDecoder.on('error', () => {
-      // CRITICAL FIX: ignore corrupted silence packets to avoid crashes
+    this.inputDecoder.on('error', (err) => {
+      this.log.warn?.('Opus error ignored', err?.message || err);
     });
 
-    this.inputFFmpeg = new prism.FFmpeg({
-      command: ffmpegPath,
-      args: [
-        '-f',
-        's16le',
-        '-ar',
-        '48000',
-        '-ac',
-        '1',
-        '-i',
-        '-',
-        '-f',
-        's16le',
-        '-ar',
-        '16000',
-        '-ac',
-        '1',
-      ],
-    });
+    this.downsampleStream = new Transform({
+      transform(chunk, _encoding, callback) {
+        // chunk is 16-bit PCM mono @ 48000Hz. Keep every 3rd sample to reach 16000Hz.
+        const output = Buffer.alloc(Math.floor(chunk.length / 6) * 2);
 
-    this.inputFFmpeg.on('error', (err) => {
-      this.log.warn?.('⚠️ FFmpeg (input) error:', err?.message || err);
+        for (let readOffset = 0, writeOffset = 0; readOffset + 1 < chunk.length; readOffset += 6, writeOffset += 2) {
+          output[writeOffset] = chunk[readOffset];
+          output[writeOffset + 1] = chunk[readOffset + 1];
+        }
+
+        callback(null, output);
+      },
     });
 
     const downsampledStream = this.opusStream
       .pipe(this.inputDecoder)
-      .pipe(this.inputFFmpeg);
+      .pipe(this.downsampleStream);
 
     downsampledStream.on('data', (chunk) => this._handleInputChunk(chunk));
 
@@ -142,7 +132,7 @@ class AudioStream {
   _connectWebSocket() {
     const url = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(
       this.agentId,
-    )}`;
+    )}&output_format=pcm_16000`;
 
     this.ws = new WebSocket(url, {
       headers: {
@@ -169,6 +159,7 @@ class AudioStream {
 
   _handleInputChunk(chunk) {
     if (this.ws?.readyState === WebSocket.OPEN) {
+      this.log.info?.('🎤 Input sent:', chunk.length);
       this.ws.send(
         JSON.stringify({
           user_audio_chunk: chunk.toString('base64'),
@@ -198,7 +189,7 @@ class AudioStream {
     this.log.info?.(`Encerrando AudioStream${reason ? `: ${reason}` : ''}`);
 
     try {
-      this.inputFFmpeg?.destroy();
+      this.downsampleStream?.destroy();
     } catch {}
     try {
       this.inputDecoder?.destroy();
