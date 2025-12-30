@@ -38,6 +38,10 @@ function startRealtimeBridge(connection, userId, options) {
     frameSize: 960,
   });
 
+  decoder.on('error', (err) => {
+    log.error?.('Erro no decoder:', err?.message || err);
+  });
+
   const ffmpeg = new prism.FFmpeg({
     command: ffmpegPath,
     args: [
@@ -58,8 +62,11 @@ function startRealtimeBridge(connection, userId, options) {
     ],
   });
 
-  const pcmStream = opusStream.pipe(decoder);
-  const downsampledStream = pcmStream.pipe(ffmpeg);
+  ffmpeg.on('error', (err) => {
+    log.error?.('Erro no ffmpeg:', err?.message || err);
+  });
+
+  const downsampledStream = opusStream.pipe(decoder).pipe(ffmpeg);
   const speakerStream = new PassThrough();
 
   const player = createAudioPlayer();
@@ -103,12 +110,6 @@ function startRealtimeBridge(connection, userId, options) {
   opusStream.on('error', (err) => {
     log.error?.('Erro no opusStream:', err?.message || err);
     stop('erro no opusStream');
-  });
-  decoder.on('error', (err) => {
-    log.error?.('Erro no decoder:', err?.message || err);
-  });
-  ffmpeg.on('error', (err) => {
-    log.error?.('Erro no ffmpeg:', err?.message || err);
   });
 
   entersState(connection, VoiceConnectionStatus.Ready, 20_000)
