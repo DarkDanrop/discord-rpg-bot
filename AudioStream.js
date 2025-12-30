@@ -1,6 +1,10 @@
 const { PassThrough, Transform } = require('node:stream');
 const WebSocket = require('ws');
 const prism = require('prism-media');
+
+try {
+  prism.FFmpeg.getPath = () => require('ffmpeg-static');
+} catch {}
 const {
   EndBehaviorType,
   StreamType,
@@ -33,7 +37,7 @@ class AudioStream {
     this.subscription = null;
     this.player = null;
     this.ffmpegStream = null;
-    this.ffmpegInputBuffer = null;
+    this.inputStream = null;
     this.opusStream = null;
     this.inputDecoder = null;
     this.downsampleStream = null;
@@ -50,11 +54,7 @@ class AudioStream {
   }
 
   _setupOutputPipeline() {
-    try {
-      require('prism-media').FFmpeg.getPath = () => require('ffmpeg-static');
-    } catch {}
-
-    this.ffmpegInputBuffer = new PassThrough();
+    this.inputStream = new PassThrough();
     this.ffmpegStream = new prism.FFmpeg({
       args: [
         '-analyseduration',
@@ -77,6 +77,8 @@ class AudioStream {
         '48000',
         '-ac',
         '2',
+        '-b:a',
+        '96k',
         '-f',
         'ogg',
       ],
@@ -87,10 +89,10 @@ class AudioStream {
     });
 
     this.ffmpegStream.on('data', (c) => {
-      console.log('🟢 FFmpeg generated opus chunk:', c.length);
+      console.log('🟢 Outputting Opus chunk:', c.length);
     });
 
-    this.ffmpegInputBuffer.pipe(this.ffmpegStream);
+    this.inputStream.pipe(this.ffmpegStream);
 
     this.player = createAudioPlayer();
     this.player.on('error', (err) => {
@@ -197,8 +199,9 @@ class AudioStream {
         payload?.audio_event?.audio_base_64 || payload?.audio_base_64;
 
       if (audioBase64) {
-        if (this.ffmpegInputBuffer?.writable) {
-          this.ffmpegInputBuffer.write(Buffer.from(audioBase64, 'base64'));
+        if (this.inputStream?.writable) {
+          this.inputStream.write(Buffer.from(audioBase64, 'base64'));
+          this.log.info?.('✅ Input Buffer Written');
           this.log.info?.('✅ Received Audio Chunk of size:', audioBase64.length);
         }
         return;
@@ -230,9 +233,9 @@ class AudioStream {
       this.opusStream?.destroy();
     } catch {}
     try {
-      this.ffmpegInputBuffer?.destroy();
+      this.inputStream?.destroy();
     } catch {}
-    this.ffmpegInputBuffer = null;
+    this.inputStream = null;
     try {
       this.ffmpegStream?.destroy();
     } catch {}
