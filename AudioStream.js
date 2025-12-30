@@ -42,8 +42,9 @@ class AudioStream {
     this.lastInputLog = 0;
     this.lastOutputLog = 0;
 
-    this.outputBuffer = null;
+    this.liveStream = null;
     this.resampler = null;
+    this.ffmpegOutput = null;
   }
 
   async start() {
@@ -80,8 +81,8 @@ class AudioStream {
   }
 
   _setupOutputPipeline() {
-    this.outputBuffer = new PassThrough({ highWaterMark: 1024 * 1024 });
-    this.outputBuffer.on('error', () => {});
+    this.liveStream = new PassThrough({ highWaterMark: 1024 * 1024 });
+    this.liveStream.on('error', () => {});
 
     const args = [
       '-f',
@@ -103,6 +104,9 @@ class AudioStream {
     this.resampler = new prism.FFmpeg({ args });
     this.resampler.on('error', () => {});
 
+    this.liveStream.pipe(this.resampler);
+    this.ffmpegOutput = this.resampler;
+
     if (this.resampler.process?.stderr) {
       this.resampler.process.stderr.on('data', (d) => {
         const log = d.toString();
@@ -112,8 +116,7 @@ class AudioStream {
       });
     }
 
-    this.outputBuffer.pipe(this.resampler);
-    this.outputBuffer.on('data', () => process.stdout.write('.'));
+    this.liveStream.on('data', () => process.stdout.write('.'));
     this.resampler.on('data', () => process.stdout.write('*'));
 
     this.player = createAudioPlayer();
@@ -124,15 +127,7 @@ class AudioStream {
       }
     });
     this.player.on('error', () => {});
-
-    const resource = createAudioResource(this.resampler, {
-      inputType: StreamType.Raw,
-    });
-
-    resource.playStream?.on?.('error', (e) => console.log('❌ Resource Error:', e));
-
     this.subscription = this.connection.subscribe(this.player);
-    this.player.play(resource);
   }
 
   _connectWebSocket() {
@@ -190,7 +185,17 @@ class AudioStream {
       const audioBase64 = payload?.audio_event?.audio_base_64 || payload?.audio_base_64;
 
       if (audioBase64) {
-        this.outputBuffer?.write(Buffer.from(audioBase64, 'base64'));
+        this.liveStream?.write(Buffer.from(audioBase64, 'base64'));
+
+        if (this.player?.state?.status === 'idle' && this.ffmpegOutput) {
+          console.log('🔄 Player Waking Up');
+          const resource = createAudioResource(this.ffmpegOutput, {
+            inputType: StreamType.Raw,
+          });
+          resource.playStream?.on?.('error', (e) => console.log('❌ Resource Error:', e));
+          this.player.play(resource);
+        }
+
         const now = Date.now();
         if (now - this.lastOutputLog > 1000) {
           this.log.info?.('✅ Output Audio');
@@ -240,13 +245,14 @@ class AudioStream {
     this.inputDecoder = null;
 
     try {
-      this.outputBuffer?.destroy();
+      this.liveStream?.destroy();
     } catch {}
-    this.outputBuffer = null;
+    this.liveStream = null;
     try {
       this.resampler?.destroy();
     } catch {}
     this.resampler = null;
+    this.ffmpegOutput = null;
 
     try {
       this.player?.stop();
