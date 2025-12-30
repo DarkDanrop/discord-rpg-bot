@@ -32,7 +32,32 @@ function startRealtimeBridge(connection, userId, options) {
     end: { behavior: EndBehaviorType.Manual },
   });
 
-  const speakerStream = new PassThrough();
+  const incomingPassThrough = new PassThrough();
+  const outputFFmpeg = new prism.FFmpeg({
+    command: ffmpegPath,
+    args: [
+      '-f',
+      's16le',
+      '-ar',
+      '16000',
+      '-ac',
+      '1',
+      '-i',
+      '-',
+      '-f',
+      's16le',
+      '-ar',
+      '48000',
+      '-ac',
+      '2',
+    ],
+  });
+
+  outputFFmpeg.on('error', (err) => {
+    log.warn?.('⚠️ FFmpeg output pipeline error:', err?.message || err);
+  });
+
+  const speakerStream = incomingPassThrough.pipe(outputFFmpeg);
 
   const player = createAudioPlayer();
   const resource = createAudioResource(speakerStream, {
@@ -85,6 +110,10 @@ function startRealtimeBridge(connection, userId, options) {
       frameSize: 960,
     });
 
+    decoder.on('error', () => {
+      /* deliberately ignore decoder errors to drop bad packets */
+    });
+
     const ffmpeg = new prism.FFmpeg({
       command: ffmpegPath,
       args: [
@@ -103,10 +132,6 @@ function startRealtimeBridge(connection, userId, options) {
         '-ac',
         '1',
       ],
-    });
-
-    decoder.on('error', (err) => {
-      log.warn?.('⚠️ Packet dropped (decoder error):', err?.message || err);
     });
 
     ffmpeg.on('error', (err) => {
@@ -133,14 +158,15 @@ function startRealtimeBridge(connection, userId, options) {
 
     try { destroyPipeline('stop chamado'); } catch {}
     try { opusStream.destroy(); } catch {}
-    try { speakerStream.end(); } catch {}
+    try { incomingPassThrough.end(); } catch {}
+    try { outputFFmpeg.destroy(); } catch {}
     try { player.stop(); } catch {}
     try { subscription.unsubscribe(); } catch {}
     try { ws?.close(); } catch {}
   }
 
   function pushIncomingAudio(buffer) {
-    speakerStream.write(buffer);
+    incomingPassThrough.write(buffer);
   }
 
   createPipeline();
@@ -153,7 +179,7 @@ function startRealtimeBridge(connection, userId, options) {
   entersState(connection, VoiceConnectionStatus.Ready, 20_000)
     .then(() => {
       ws = new WebSocket(
-        `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(agentId)}`,
+        `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(agentId)}&output_format=pcm_16000`,
         {
           headers: {
             'xi-api-key': apiKey,
@@ -167,7 +193,6 @@ function startRealtimeBridge(connection, userId, options) {
 
       ws.on('message', (data, isBinary) => {
         if (isBinary) {
-          console.log('🔊 Received audio from AI');
           pushIncomingAudio(data);
           return;
         }
@@ -177,7 +202,6 @@ function startRealtimeBridge(connection, userId, options) {
           const base64Audio = parsed?.data?.audio_event?.audio_base_64;
 
           if (base64Audio) {
-            console.log('🔊 Received audio from AI');
             pushIncomingAudio(Buffer.from(base64Audio, 'base64'));
           }
         } catch (err) {
