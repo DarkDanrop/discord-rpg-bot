@@ -51,7 +51,7 @@ class AudioStream {
 
   _setupOutputPipeline() {
     try {
-      prism.FFmpeg.getPath = () => require('ffmpeg-static');
+      require('prism-media').FFmpeg.getPath = () => require('ffmpeg-static');
     } catch {}
 
     this.ffmpegInputBuffer = new PassThrough();
@@ -61,6 +61,8 @@ class AudioStream {
         '0',
         '-tune',
         'zerolatency',
+        '-flags',
+        'low_delay',
         '-f',
         's16le',
         '-ar',
@@ -69,17 +71,23 @@ class AudioStream {
         '1',
         '-i',
         '-',
-        '-f',
-        's16le',
+        '-c:a',
+        'libopus',
         '-ar',
         '48000',
         '-ac',
         '2',
+        '-f',
+        'ogg',
       ],
     });
 
     this.ffmpegStream.on('error', (err) => {
       this.log.error?.('Erro no FFmpeg:', err?.message || err);
+    });
+
+    this.ffmpegStream.on('data', (c) => {
+      console.log('🟢 FFmpeg generated opus chunk:', c.length);
     });
 
     this.ffmpegInputBuffer.pipe(this.ffmpegStream);
@@ -90,7 +98,7 @@ class AudioStream {
     });
 
     const resource = createAudioResource(this.ffmpegStream, {
-      inputType: StreamType.Raw,
+      inputType: StreamType.OggOpus,
     });
 
     this.subscription = this.connection.subscribe(this.player);
