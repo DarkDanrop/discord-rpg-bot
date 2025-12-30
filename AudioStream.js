@@ -1,4 +1,4 @@
-const { Transform } = require('node:stream');
+const { PassThrough, Transform } = require('node:stream');
 const WebSocket = require('ws');
 const prism = require('prism-media');
 const {
@@ -32,8 +32,9 @@ class AudioStream {
     this.ws = null;
     this.subscription = null;
     this.player = null;
-    this.upsampler = null;
+    this.aiResponseStream = null;
     this.aiInputStream = null;
+    this.ffmpegStream = null;
     this.opusStream = null;
     this.inputDecoder = null;
     this.downsampleStream = null;
@@ -50,32 +51,41 @@ class AudioStream {
   }
 
   _setupOutputPipeline() {
-    this.upsampler = new Transform({
-      transform(chunk, _encoding, callback) {
-        const output = Buffer.alloc(chunk.length * 3);
+    this.aiResponseStream = new PassThrough();
+    this.aiResponseStream.on('error', console.error);
 
-        for (let readOffset = 0, writeOffset = 0; readOffset + 1 < chunk.length; readOffset += 2) {
-          const byte1 = chunk[readOffset];
-          const byte2 = chunk[readOffset + 1];
-
-          output[writeOffset] = byte1;
-          output[writeOffset + 1] = byte2;
-          output[writeOffset + 2] = byte1;
-          output[writeOffset + 3] = byte2;
-          output[writeOffset + 4] = byte1;
-          output[writeOffset + 5] = byte2;
-
-          writeOffset += 6;
-        }
-
-        callback(null, output);
-      },
+    this.ffmpegStream = new prism.FFmpeg({
+      args: [
+        '-analyseduration',
+        '0',
+        '-tune',
+        'zerolatency',
+        '-f',
+        's16le',
+        '-ar',
+        '16000',
+        '-ac',
+        '1',
+        '-i',
+        '-',
+        '-f',
+        's16le',
+        '-ar',
+        '48000',
+        '-ac',
+        '2',
+      ],
     });
 
-    this.aiInputStream = this.upsampler;
+    this.ffmpegStream.on('error', console.error);
+
+    this.aiResponseStream.pipe(this.ffmpegStream);
+    this.aiInputStream = this.aiResponseStream;
 
     this.player = createAudioPlayer();
-    const resource = createAudioResource(this.upsampler, {
+    this.player.on('error', console.error);
+
+    const resource = createAudioResource(this.ffmpegStream, {
       inputType: StreamType.Raw,
     });
 
@@ -176,10 +186,10 @@ class AudioStream {
 
       const base64Audio = parsed?.data?.audio_event?.audio_base_64;
 
-      if (base64Audio && this.upsampler) {
+      if (base64Audio && this.aiInputStream) {
         const decodedBuffer = Buffer.from(base64Audio, 'base64');
-        console.log('🔊 Playing Audio Chunk', decodedBuffer.length);
-        this.upsampler.write(decodedBuffer);
+        console.log('🔊 Buffered Audio Chunk', decodedBuffer.length);
+        this.aiInputStream.write(decodedBuffer);
       }
     } catch (err) {
       this.log.warn?.('Mensagem inesperada do WebSocket', err?.message || err);
@@ -200,6 +210,9 @@ class AudioStream {
     } catch {}
     try {
       this.opusStream?.destroy();
+    } catch {}
+    try {
+      this.ffmpegStream?.destroy();
     } catch {}
     try {
       this.aiInputStream?.destroy();
