@@ -1,6 +1,7 @@
 const { PassThrough } = require('node:stream');
 const WebSocket = require('ws');
 const prism = require('prism-media');
+const ffmpegPath = require('ffmpeg-static');
 const {
   EndBehaviorType,
   StreamType,
@@ -37,7 +38,24 @@ function startRealtimeBridge(connection, userId, options) {
     frameSize: 960,
   });
 
+  const ffmpeg = new prism.FFmpeg({
+    command: ffmpegPath,
+    args: [
+      '-analyzeduration',
+      '0',
+      '-loglevel',
+      '0',
+      '-f',
+      's16le',
+      '-ar',
+      '16000',
+      '-ac',
+      '1',
+    ],
+  });
+
   const pcmStream = opusStream.pipe(decoder);
+  const downsampledStream = pcmStream.pipe(ffmpeg);
   const playbackStream = new PassThrough();
 
   const player = createAudioPlayer();
@@ -56,9 +74,10 @@ function startRealtimeBridge(connection, userId, options) {
 
     log.info?.(`Encerrando bridge de voz${reason ? `: ${reason}` : ''}`);
 
-    try { pcmStream.off('data', handlePcmData); } catch {}
+    try { downsampledStream.off('data', handlePcmData); } catch {}
     try { opusStream.destroy(); } catch {}
     try { decoder.destroy(); } catch {}
+    try { ffmpeg.destroy(); } catch {}
     try { playbackStream.end(); } catch {}
     try { player.stop(); } catch {}
     try { subscription.unsubscribe(); } catch {}
@@ -76,7 +95,7 @@ function startRealtimeBridge(connection, userId, options) {
     playbackStream.write(buffer);
   }
 
-  pcmStream.on('data', handlePcmData);
+  downsampledStream.on('data', handlePcmData);
   opusStream.on('error', (err) => {
     log.error?.('Erro no opusStream:', err?.message || err);
     stop('erro no opusStream');
@@ -108,7 +127,11 @@ function startRealtimeBridge(connection, userId, options) {
 
         try {
           const parsed = JSON.parse(data.toString());
-          const base64Audio = parsed?.audio_event?.audio_base64 || parsed?.audio?.base64;
+          const base64Audio =
+            parsed?.audio_event?.audio_base_64 ||
+            parsed?.audio_event?.audio_base64 ||
+            parsed?.audio?.base64;
+
           if (base64Audio) {
             pushIncomingAudio(Buffer.from(base64Audio, 'base64'));
           }
