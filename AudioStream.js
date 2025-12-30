@@ -83,28 +83,24 @@ class AudioStream {
     this.outputBuffer = new PassThrough();
     this.outputBuffer.on('error', () => {});
 
-    this.resampler = new prism.FFmpeg({
-      args: [
-        '-analyseduration',
-        '0',
-        '-tune',
-        'zerolatency',
-        '-f',
-        's16le',
-        '-ar',
-        '16000',
-        '-ac',
-        '1',
-        '-i',
-        '-',
-        '-f',
-        's16le',
-        '-ar',
-        '48000',
-        '-ac',
-        '2',
-      ],
-    });
+    const args = [
+      '-f',
+      's16le',
+      '-ar',
+      '16000',
+      '-ac',
+      '1',
+      '-i',
+      '-',
+      '-f',
+      's16le',
+      '-ar',
+      '48000',
+      '-ac',
+      '2',
+    ];
+
+    this.resampler = new prism.FFmpeg({ args });
     this.resampler.on('error', () => {});
 
     if (this.resampler.process?.stderr) {
