@@ -14,7 +14,7 @@ function startRealtimeBridge(connection, userId, options) {
   const {
     agentId,
     apiKey,
-    sampleRate = 48000,
+    sampleRate = 16000,
     log = console,
   } = options || {};
 
@@ -75,7 +75,8 @@ function startRealtimeBridge(connection, userId, options) {
 
   function handlePcmData(chunk) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(chunk);
+      const payload = { user_audio_chunk: chunk.toString('base64') };
+      ws.send(JSON.stringify(payload));
     }
   }
 
