@@ -32,41 +32,6 @@ function startRealtimeBridge(connection, userId, options) {
     end: { behavior: EndBehaviorType.Manual },
   });
 
-  const decoder = new prism.opus.Decoder({
-    rate: 48000,
-    channels: 1,
-    frameSize: 960,
-  });
-
-  decoder.on('error', (err) => {
-    log.error?.('Erro no decoder:', err?.message || err);
-  });
-
-  const ffmpeg = new prism.FFmpeg({
-    command: ffmpegPath,
-    args: [
-      '-f',
-      's16le',
-      '-ar',
-      '48000',
-      '-ac',
-      '1',
-      '-i',
-      '-',
-      '-f',
-      's16le',
-      '-ar',
-      '16000',
-      '-ac',
-      '1',
-    ],
-  });
-
-  ffmpeg.on('error', (err) => {
-    log.error?.('Erro no ffmpeg:', err?.message || err);
-  });
-
-  const downsampledStream = opusStream.pipe(decoder).pipe(ffmpeg);
   const speakerStream = new PassThrough();
 
   const player = createAudioPlayer();
@@ -78,6 +43,90 @@ function startRealtimeBridge(connection, userId, options) {
   player.play(resource);
 
   let ws = null;
+  let pipeline = null;
+  let pcmChunkCount = 0;
+
+  function destroyPipeline(reason) {
+    if (!pipeline) return;
+
+    log.info?.(
+      `Destruindo pipeline de áudio${reason ? ` (${reason})` : ''}`
+    );
+
+    try { pipeline.downsampledStream?.off('data', pipeline.handleData); } catch {}
+    try { opusStream.unpipe(pipeline.decoder); } catch {}
+    try { pipeline.decoder.unpipe?.(pipeline.ffmpeg); } catch {}
+    try { pipeline.decoder.destroy(); } catch {}
+    try { pipeline.ffmpeg.destroy(); } catch {}
+
+    pipeline = null;
+  }
+
+  function handlePcmData(chunk) {
+    if (ws?.readyState === WebSocket.OPEN) {
+      pcmChunkCount += 1;
+      if (pcmChunkCount <= 3 || pcmChunkCount % 50 === 0) {
+        console.log('🎤 Sending chunk to AI');
+      }
+
+      const payload = { user_audio_chunk: chunk.toString('base64') };
+      ws.send(JSON.stringify(payload));
+    }
+  }
+
+  function createPipeline() {
+    if (stopped) return;
+
+    destroyPipeline('reiniciando');
+
+    const decoder = new prism.opus.Decoder({
+      rate: 48000,
+      channels: 1,
+      frameSize: 960,
+    });
+
+    const ffmpeg = new prism.FFmpeg({
+      command: ffmpegPath,
+      args: [
+        '-f',
+        's16le',
+        '-ar',
+        '48000',
+        '-ac',
+        '1',
+        '-i',
+        '-',
+        '-f',
+        's16le',
+        '-ar',
+        '16000',
+        '-ac',
+        '1',
+      ],
+    });
+
+    decoder.on('error', (err) => {
+      log.error?.('Erro no decoder:', err?.message || err);
+      if (stopped) return;
+      destroyPipeline('erro no decoder');
+      createPipeline();
+    });
+
+    ffmpeg.on('error', (err) => {
+      log.error?.('Erro no ffmpeg:', err?.message || err);
+    });
+
+    const downsampledStream = opusStream.pipe(decoder).pipe(ffmpeg);
+
+    pipeline = {
+      decoder,
+      ffmpeg,
+      downsampledStream,
+      handleData: handlePcmData,
+    };
+
+    downsampledStream.on('data', handlePcmData);
+  }
 
   function stop(reason) {
     if (stopped) return;
@@ -85,28 +134,20 @@ function startRealtimeBridge(connection, userId, options) {
 
     log.info?.(`Encerrando bridge de voz${reason ? `: ${reason}` : ''}`);
 
-    try { downsampledStream.off('data', handlePcmData); } catch {}
+    try { destroyPipeline('stop chamado'); } catch {}
     try { opusStream.destroy(); } catch {}
-    try { decoder.destroy(); } catch {}
-    try { ffmpeg.destroy(); } catch {}
     try { speakerStream.end(); } catch {}
     try { player.stop(); } catch {}
     try { subscription.unsubscribe(); } catch {}
     try { ws?.close(); } catch {}
   }
 
-  function handlePcmData(chunk) {
-    if (ws?.readyState === WebSocket.OPEN) {
-      const payload = { user_audio_chunk: chunk.toString('base64') };
-      ws.send(JSON.stringify(payload));
-    }
-  }
-
   function pushIncomingAudio(buffer) {
     speakerStream.write(buffer);
   }
 
-  downsampledStream.on('data', handlePcmData);
+  createPipeline();
+
   opusStream.on('error', (err) => {
     log.error?.('Erro no opusStream:', err?.message || err);
     stop('erro no opusStream');
@@ -129,6 +170,7 @@ function startRealtimeBridge(connection, userId, options) {
 
       ws.on('message', (data, isBinary) => {
         if (isBinary) {
+          console.log('🔊 Received audio from AI');
           pushIncomingAudio(data);
           return;
         }
@@ -138,6 +180,7 @@ function startRealtimeBridge(connection, userId, options) {
           const base64Audio = parsed?.data?.audio_event?.audio_base_64;
 
           if (base64Audio) {
+            console.log('🔊 Received audio from AI');
             pushIncomingAudio(Buffer.from(base64Audio, 'base64'));
           }
         } catch (err) {
