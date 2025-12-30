@@ -53,6 +53,12 @@ class AudioStream {
 
   _setupOutputPipeline() {
     this.ffmpegProc = spawn(ffmpegPath, [
+      '-analyseduration',
+      '0',
+      '-tune',
+      'zerolatency',
+      '-flags',
+      'low_delay',
       '-f',
       's16le',
       '-ar',
@@ -60,13 +66,15 @@ class AudioStream {
       '-ac',
       '1',
       '-i',
-      'pipe:0',
-      '-f',
-      's16le',
+      '-',
+      '-c:a',
+      'libopus',
       '-ar',
       '48000',
       '-ac',
       '2',
+      '-f',
+      'opus',
       'pipe:1',
     ]);
 
@@ -81,7 +89,7 @@ class AudioStream {
     this.player.on('error', console.error);
 
     const resource = createAudioResource(this.ffmpegProc.stdout, {
-      inputType: StreamType.Raw,
+      inputType: StreamType.Opus,
     });
 
     this.subscription = this.connection.subscribe(this.player);
