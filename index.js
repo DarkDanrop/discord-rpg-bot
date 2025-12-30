@@ -1,12 +1,12 @@
-require("dotenv").config();
+require('dotenv').config();
 
-const { Client, Events, GatewayIntentBits, Partials } = require("discord.js");
+const { Client, Events, GatewayIntentBits, Partials } = require('discord.js');
 const {
   joinVoiceChannel,
   VoiceConnectionStatus,
   entersState,
-} = require("@discordjs/voice");
-const { startRealtimeBridge } = require("./realtime");
+} = require('@discordjs/voice');
+const { AudioStream } = require('./AudioStream');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
@@ -15,7 +15,7 @@ const ELEVENLABS_AGENT_ID = process.env.ELEVENLABS_AGENT_ID;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 
 if (!DISCORD_TOKEN || !GUILD_ID || !VOICE_CHANNEL_ID) {
-  console.error("Faltou DISCORD_TOKEN, GUILD_ID ou VOICE_CHANNEL_ID nas env vars");
+  console.error('Faltou DISCORD_TOKEN, GUILD_ID ou VOICE_CHANNEL_ID nas env vars');
   process.exit(1);
 }
 
@@ -32,12 +32,12 @@ const client = new Client({
 
 let booted = false;
 let connection = null;
-let realtimeBridge = null;
+let audioStream = null;
 
-const COMMAND_PREFIX = "!";
+const COMMAND_PREFIX = '!';
 
 function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function connectVoice() {
@@ -49,7 +49,7 @@ async function connectVoice() {
   const channel = await guild.channels.fetch(VOICE_CHANNEL_ID);
 
   if (!channel || !channel.isVoiceBased?.()) {
-    throw new Error("VOICE_CHANNEL_ID não parece ser um canal de voz válido.");
+    throw new Error('VOICE_CHANNEL_ID não parece ser um canal de voz válido.');
   }
 
   console.log(`Entrando no canal de voz: ${channel.name}`);
@@ -62,18 +62,18 @@ async function connectVoice() {
     selfMute: false,
   });
 
-  connection.on("error", (err) => {
-    console.error("VoiceConnection error:", err?.message || err);
+  connection.on('error', (err) => {
+    console.error('VoiceConnection error:', err?.message || err);
   });
 
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
-    console.warn("⚠️ VoiceConnection: Disconnected — tentando reconectar...");
+    console.warn('⚠️ VoiceConnection: Disconnected — tentando reconectar...');
     try {
       await Promise.race([
         entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
       ]);
-      console.log("✅ reconectou (signalling/connecting)");
+      console.log('✅ reconectou (signalling/connecting)');
     } catch {
       try {
         connection.destroy();
@@ -89,7 +89,7 @@ async function connectVoice() {
       const error = err instanceof Error ? err : new Error(String(err));
       reject(error);
     };
-    connection.once("error", errorListener);
+    connection.once('error', errorListener);
   });
 
   try {
@@ -99,10 +99,10 @@ async function connectVoice() {
     ]);
   } finally {
     if (errorListener) {
-      connection.off("error", errorListener);
+      connection.off('error', errorListener);
     }
   }
-  console.log("✅ VoiceConnection: Ready (conectado no canal)");
+  console.log('✅ VoiceConnection: Ready (conectado no canal)');
   return connection;
 }
 
@@ -111,29 +111,25 @@ async function safeConnectLoop() {
     try {
       console.log(`🔁 tentativa de conectar no voice: ${attempt}/10`);
       await connectVoice();
-      return; // sucesso
+      return;
     } catch (err) {
       const msg = err?.message || String(err);
-      console.error("Erro ao conectar voice:", msg);
-
-      // erro típico do Railway / cloud UDP discovery
-      // a gente só tenta de novo em vez de matar o container
+      console.error('Erro ao conectar voice:', msg);
       await sleep(3000);
     }
   }
 
-  console.error("❌ não consegui conectar no voice após 10 tentativas.");
-  // não dá exit; deixa rodando pra você ver logs e ajustar rede
+  console.error('❌ não consegui conectar no voice após 10 tentativas.');
 }
 
-function stopRealtime(reason) {
-  if (!realtimeBridge) return;
+function stopAudioStream(reason) {
+  if (!audioStream) return;
   try {
-    realtimeBridge.stop(reason);
+    audioStream.stop(reason);
   } catch (err) {
-    console.warn("Erro ao parar bridge em tempo real:", err?.message || err);
+    console.warn('Erro ao parar AudioStream:', err?.message || err);
   }
-  realtimeBridge = null;
+  audioStream = null;
 }
 
 async function boot() {
@@ -142,17 +138,12 @@ async function boot() {
 
   console.log(`Logado como ${client.user.tag}`);
   await safeConnectLoop();
-
-  // aqui depois a gente liga o recorder de verdade (Etapa 4 parte 2)
-  // require("./recorder").startRecording(connection);
 }
 
-// usa o evento ClientReady recomendado no discord.js v14
 client.once(Events.ClientReady, boot);
-
 client.login(DISCORD_TOKEN);
 
-client.on("messageCreate", async (message) => {
+client.on('messageCreate', async (message) => {
   if (!message.content?.startsWith(COMMAND_PREFIX)) return;
   if (message.author.bot) return;
 
@@ -163,30 +154,30 @@ client.on("messageCreate", async (message) => {
 
   const cmd = command?.toLowerCase();
 
-  if (cmd === "ping") {
-    await message.reply("Pong!");
+  if (cmd === 'ping') {
+    await message.reply('Pong!');
     return;
   }
 
-  if (cmd === "help") {
+  if (cmd === 'help') {
     await message.reply(
       [
-        "Comandos disponíveis:",
-        "!join - conecta no canal de voz configurado",
-        "!leave - sai do canal de voz",
-        "!realtime - inicia streaming bidirecional com a ElevenLabs (autor da mensagem)",
-        "!stoprealtime - encerra o streaming bidirecional ativo",
-        "!ping - teste rápido de vida do bot",
-        "!help - mostra esta mensagem",
-      ].join("\n")
+        'Comandos disponíveis:',
+        '!join - conecta no canal de voz configurado',
+        '!leave - sai do canal de voz',
+        '!realtime - inicia streaming bidirecional com a ElevenLabs (autor da mensagem)',
+        '!stoprealtime - encerra o streaming bidirecional ativo',
+        '!ping - teste rápido de vida do bot',
+        '!help - mostra esta mensagem',
+      ].join('\n'),
     );
     return;
   }
 
-  if (cmd === "join") {
+  if (cmd === 'join') {
     try {
       await safeConnectLoop();
-      await message.reply("Entrei (ou já estava) no canal de voz configurado.");
+      await message.reply('Entrei (ou já estava) no canal de voz configurado.');
     } catch (err) {
       const reason = err?.message || String(err);
       await message.reply(`Não consegui entrar no voice: ${reason}`);
@@ -194,26 +185,27 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  if (cmd === "leave") {
+  if (cmd === 'leave') {
     if (connection) {
       try {
-        stopRealtime("leave command");
+        stopAudioStream('leave command');
         connection.destroy();
         connection = null;
-        await message.reply("Saí do canal de voz.");
+        await message.reply('Saí do canal de voz.');
       } catch (err) {
         const reason = err?.message || String(err);
         await message.reply(`Erro ao sair do voice: ${reason}`);
       }
     } else {
-      await message.reply("Não estou em nenhum canal de voz agora.");
+      await message.reply('Não estou em nenhum canal de voz agora.');
     }
+    return;
   }
 
-  if (cmd === "realtime") {
+  if (cmd === 'realtime') {
     if (!ELEVENLABS_AGENT_ID || !ELEVENLABS_API_KEY) {
       await message.reply(
-        "Configure ELEVENLABS_AGENT_ID e ELEVENLABS_API_KEY para usar o modo em tempo real."
+        'Configure ELEVENLABS_AGENT_ID e ELEVENLABS_API_KEY para usar o modo em tempo real.',
       );
       return;
     }
@@ -221,43 +213,46 @@ client.on("messageCreate", async (message) => {
     const member = message.member;
     const memberVoiceChannelId = member?.voice?.channelId;
     if (!memberVoiceChannelId) {
-      await message.reply("Você precisa estar em um canal de voz para iniciar o streaming.");
+      await message.reply('Você precisa estar em um canal de voz para iniciar o streaming.');
       return;
     }
 
     if (memberVoiceChannelId !== VOICE_CHANNEL_ID) {
       await message.reply(
-        "Entre primeiro no canal de voz configurado (VOICE_CHANNEL_ID) para iniciar o streaming."
+        'Entre primeiro no canal de voz configurado (VOICE_CHANNEL_ID) para iniciar o streaming.',
       );
       return;
     }
 
     try {
       await safeConnectLoop();
-      stopRealtime("novo streaming solicitado");
+      stopAudioStream('novo streaming solicitado');
 
-      realtimeBridge = startRealtimeBridge(connection, member.id, {
+      audioStream = new AudioStream(connection, member.id, {
         agentId: ELEVENLABS_AGENT_ID,
         apiKey: ELEVENLABS_API_KEY,
         log: console,
       });
 
+      await audioStream.start();
+
       await message.reply(
-        "Streaming bidirecional iniciado. Fale no canal e receba a resposta do agente em tempo real."
+        'Streaming bidirecional iniciado. Fale no canal e receba a resposta do agente em tempo real.',
       );
     } catch (err) {
+      stopAudioStream('falha ao iniciar streaming');
       const reason = err?.message || String(err);
       await message.reply(`Não consegui iniciar o streaming: ${reason}`);
     }
     return;
   }
 
-  if (cmd === "stoprealtime") {
-    if (realtimeBridge) {
-      stopRealtime("pedido do usuário");
-      await message.reply("Streaming bidirecional interrompido.");
+  if (cmd === 'stoprealtime') {
+    if (audioStream) {
+      stopAudioStream('pedido do usuário');
+      await message.reply('Streaming bidirecional interrompido.');
     } else {
-      await message.reply("Nenhum streaming bidirecional estava ativo.");
+      await message.reply('Nenhum streaming bidirecional estava ativo.');
     }
     return;
   }
