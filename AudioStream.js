@@ -80,7 +80,7 @@ class AudioStream {
   }
 
   _setupOutputPipeline() {
-    this.outputBuffer = new PassThrough();
+    this.outputBuffer = new PassThrough({ highWaterMark: 1024 * 1024 });
     this.outputBuffer.on('error', () => {});
 
     const args = [
@@ -119,6 +119,9 @@ class AudioStream {
     this.player = createAudioPlayer();
     this.player.on('stateChange', (oldState, newState) => {
       console.log(`📀 Player State: ${oldState.status} -> ${newState.status}`);
+      if (newState.status === 'idle') {
+        console.log('⚠️ Player went idle (stream ended?)');
+      }
     });
     this.player.on('error', () => {});
 
