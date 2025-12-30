@@ -14,7 +14,6 @@ function startRealtimeBridge(connection, userId, options) {
   const {
     agentId,
     apiKey,
-    sampleRate = 16000,
     log = console,
   } = options || {};
 
@@ -33,7 +32,7 @@ function startRealtimeBridge(connection, userId, options) {
   });
 
   const decoder = new prism.opus.Decoder({
-    rate: sampleRate,
+    rate: 48000,
     channels: 1,
     frameSize: 960,
   });
@@ -121,8 +120,7 @@ function startRealtimeBridge(connection, userId, options) {
     stop('erro no opusStream');
   });
   decoder.on('error', (err) => {
-    log.error?.('Erro no decoder:', err?.message || err);
-    stop('erro no decoder');
+    log.warn?.('Erro ignorado no decoder:', err?.message || err);
   });
 
   entersState(connection, VoiceConnectionStatus.Ready, 5_000).catch((err) => {
