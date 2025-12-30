@@ -36,6 +36,7 @@ class AudioStream {
     this.player = null;
     this.ffmpegProc = null;
     this.ffmpegInputBuffer = null;
+    this.outputStream = null;
     this.opusStream = null;
     this.inputDecoder = null;
     this.downsampleStream = null;
@@ -67,14 +68,12 @@ class AudioStream {
       '1',
       '-i',
       '-',
-      '-c:a',
-      'libopus',
+      '-f',
+      's16le',
       '-ar',
       '48000',
       '-ac',
       '2',
-      '-f',
-      'opus',
       'pipe:1',
     ]);
 
@@ -85,11 +84,14 @@ class AudioStream {
     this.ffmpegInputBuffer = new PassThrough();
     this.ffmpegInputBuffer.pipe(this.ffmpegProc.stdin);
 
+    this.outputStream = new PassThrough();
+    this.ffmpegProc.stdout.pipe(this.outputStream);
+
     this.player = createAudioPlayer();
     this.player.on('error', console.error);
 
-    const resource = createAudioResource(this.ffmpegProc.stdout, {
-      inputType: StreamType.Opus,
+    const resource = createAudioResource(this.outputStream, {
+      inputType: StreamType.Raw,
     });
 
     this.subscription = this.connection.subscribe(this.player);
@@ -171,7 +173,6 @@ class AudioStream {
 
   _handleInputChunk(chunk) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.log.info?.('🎤 Input sent', chunk.length);
       this.ws.send(
         JSON.stringify({
           user_audio_chunk: chunk.toString('base64'),
@@ -224,6 +225,10 @@ class AudioStream {
       this.ffmpegInputBuffer?.destroy();
     } catch {}
     this.ffmpegInputBuffer = null;
+    try {
+      this.outputStream?.destroy();
+    } catch {}
+    this.outputStream = null;
     try {
       this.ffmpegProc?.stdin?.destroy();
       this.ffmpegProc?.stdout?.destroy();
