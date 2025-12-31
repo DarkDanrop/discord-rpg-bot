@@ -208,7 +208,7 @@ class AudioStream {
 
     this.heartbeatInterval = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: 'ping' }));
+        this.ws.ping();
       }
     }, 30000);
   }
