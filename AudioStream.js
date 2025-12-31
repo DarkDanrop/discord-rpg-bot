@@ -224,11 +224,13 @@ class AudioStream {
 
     this.silenceTimeout = setTimeout(() => {
       try {
+        const silence = Buffer.alloc(9600, 0); // ~200ms of silence padding
+        this.currentResponseStream?.write(silence);
         this.currentResponseStream?.end();
       } catch {}
       this.currentResponseStream = null;
       console.log('🤫 Speech segment ended');
-    }, 1000);
+    }, 3000);
   }
 
   _downsample(chunk) {
