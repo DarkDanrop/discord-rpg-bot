@@ -4,7 +4,7 @@ const prism = require('prism-media');
 
 prism.FFmpeg.getPath = () => require('ffmpeg-static');
 
-const VAD_THRESHOLD = 1000; // Filters background static so silence truly ends a turn
+const VAD_THRESHOLD = 500; // Filters background static so silence truly ends a turn
 const DISCORD_SAMPLE_RATE = 48000;
 const AI_SAMPLE_RATE = 16000;
 const RESPONSE_SILENCE_TIMEOUT_MS = 3000;
