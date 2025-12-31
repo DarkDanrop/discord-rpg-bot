@@ -395,7 +395,7 @@ class AudioStream {
     const output = Buffer.allocUnsafe(Math.floor(chunk.length / 12) * 2);
     let outIndex = 0;
 
-    for (let offset = 0; offset + 3 < chunk.length; offset += 12) {
+    for (let offset = 0; offset <= chunk.length - 12; offset += 12) {
       const left = chunk.readInt16LE(offset);
       const right = chunk.readInt16LE(offset + 2);
       const mixed = Math.round((left + right) / 2);
