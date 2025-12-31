@@ -4,6 +4,9 @@ const prism = require('prism-media');
 
 prism.FFmpeg.getPath = () => require('ffmpeg-static');
 
+const RESPONSE_SILENCE_TIMEOUT_MS = 3000;
+const RESPONSE_SILENCE_PADDING_BYTES = 9600; // ~200ms of silence padding
+
 const {
   EndBehaviorType,
   StreamType,
@@ -228,13 +231,13 @@ class AudioStream {
 
     this.silenceTimeout = setTimeout(() => {
       try {
-        const silence = Buffer.alloc(9600, 0); // ~200ms of silence padding
+        const silence = Buffer.alloc(RESPONSE_SILENCE_PADDING_BYTES, 0);
         this.currentResponseStream?.write(silence);
         this.currentResponseStream?.end();
       } catch {}
       this.currentResponseStream = null;
       console.log('🤫 Speech segment ended');
-    }, 3000);
+    }, RESPONSE_SILENCE_TIMEOUT_MS);
   }
 
   _downsample(chunk) {
