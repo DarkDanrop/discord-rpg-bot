@@ -71,11 +71,6 @@ class AudioStream {
 
     this.inputDecoder.on('data', (chunk) => {
       try {
-        const averageAmplitude = this._calculateAverageAmplitude(chunk);
-        if (averageAmplitude <= 800) {
-          return;
-        }
-
         const downsampled = this._downsample(chunk);
         this._handleInputChunk(downsampled);
 
@@ -182,6 +177,10 @@ class AudioStream {
       this.currentResponseStream.on('error', () => {});
 
       const args = [
+        '-analyseduration',
+        '0',
+        '-tune',
+        'zerolatency',
         '-f',
         's16le',
         '-ar',
@@ -253,23 +252,6 @@ class AudioStream {
     }
 
     return output;
-  }
-
-  _calculateAverageAmplitude(chunk) {
-    if (!chunk?.length) return 0;
-
-    const sampleCount = Math.floor(chunk.length / 2);
-    if (sampleCount <= 0) {
-      return 0;
-    }
-
-    let sum = 0;
-    for (let i = 0; i < sampleCount; i += 1) {
-      const sample = chunk.readInt16LE(i * 2);
-      sum += Math.abs(sample);
-    }
-
-    return sum / sampleCount;
   }
 
   stop(reason) {
