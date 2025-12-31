@@ -272,7 +272,7 @@ class AudioStream {
       this.silenceFrames += 1;
       this.speakingFrames = 0;
 
-      if (this.silenceFrames > 25) {
+      if (this.silenceFrames > 50) {
         this.isSpeaking = false;
       }
     }
