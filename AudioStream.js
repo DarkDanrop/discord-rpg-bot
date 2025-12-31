@@ -180,10 +180,6 @@ class AudioStream {
       this.currentResponseStream.on('error', () => {});
 
       const args = [
-        '-analyseduration',
-        '0',
-        '-tune',
-        'zerolatency',
         '-f',
         's16le',
         '-ar',
