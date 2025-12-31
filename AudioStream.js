@@ -4,7 +4,7 @@ const prism = require('prism-media');
 
 prism.FFmpeg.getPath = () => require('ffmpeg-static');
 
-const VAD_THRESHOLD = 500; // Filters background static so silence truly ends a turn
+const VAD_THRESHOLD = 200; // Filters background static so silence truly ends a turn
 const DISCORD_SAMPLE_RATE = 48000;
 const AI_SAMPLE_RATE = 16000;
 const RESPONSE_SILENCE_TIMEOUT_MS = 3000;
@@ -263,16 +263,16 @@ class AudioStream {
 
     if (amplitude > VAD_THRESHOLD) {
       this.speakingFrames += 1;
-      this.silenceFrames = 0;
+      this. = 0;
 
       if (this.speakingFrames >= 3) {
         this.isSpeaking = true;
       }
     } else {
-      this.silenceFrames += 1;
+      this. += 1;
       this.speakingFrames = 0;
 
-      if (this.silenceFrames > 50) {
+      if (this.silenceFrames > 80) {
         this.isSpeaking = false;
       }
     }
