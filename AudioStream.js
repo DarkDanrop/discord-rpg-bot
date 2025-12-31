@@ -4,7 +4,7 @@ const prism = require('prism-media');
 
 prism.FFmpeg.getPath = () => require('ffmpeg-static');
 
-const VAD_THRESHOLD = 700; // Filters background static so silence truly ends a turn
+const VAD_THRESHOLD = 1000; // Filters background static so silence truly ends a turn
 const DISCORD_SAMPLE_RATE = 48000;
 const AI_SAMPLE_RATE = 16000;
 const RESPONSE_SILENCE_TIMEOUT_MS = 3000;
@@ -58,6 +58,10 @@ class AudioStream {
     this.reconnectTimer = null;
 
     this.heartbeatInterval = null;
+
+    this.speakingFrames = 0;
+    this.silenceFrames = 0;
+    this.isSpeaking = false;
   }
 
   /**
@@ -76,7 +80,7 @@ class AudioStream {
 
   /**
    * Manual JS VAD/downsampling to avoid FFmpeg pipe latency and maintain Railway/Discord stability.
-   * Do not change this logic — it is tuned for production environments.
+   * Handles Discord's stereo input while providing hysteresis-based gating to avoid rapid toggling.
    */
   _setupInputPipeline() {
     this.opusStream = this.connection.receiver.subscribe(this.userId, {
@@ -99,7 +103,7 @@ class AudioStream {
         } catch {}
       }
 
-      const decoder = new prism.opus.Decoder({ rate: DISCORD_SAMPLE_RATE, channels: 1, frameSize: 960 });
+      const decoder = new prism.opus.Decoder({ rate: DISCORD_SAMPLE_RATE, channels: 2, frameSize: 960 });
       this.inputDecoder = decoder;
 
       decoder.on('error', () => {
@@ -246,16 +250,34 @@ class AudioStream {
   _handleInputChunk(chunk) {
     if (!chunk?.length) return;
 
-    let hasSpeech = false;
+    let amplitude = 0;
     for (let i = 0; i < chunk.length; i += 2) {
       const value = Math.abs(chunk.readInt16LE(i));
-      if (value > VAD_THRESHOLD) {
-        hasSpeech = true;
+      if (value > amplitude) {
+        amplitude = value;
+      }
+      if (amplitude > VAD_THRESHOLD) {
         break;
       }
     }
 
-    if (!hasSpeech) return;
+    if (amplitude > VAD_THRESHOLD) {
+      this.speakingFrames += 1;
+      this.silenceFrames = 0;
+
+      if (this.speakingFrames >= 3) {
+        this.isSpeaking = true;
+      }
+    } else {
+      this.silenceFrames += 1;
+      this.speakingFrames = 0;
+
+      if (this.silenceFrames > 25) {
+        this.isSpeaking = false;
+      }
+    }
+
+    if (!this.isSpeaking) return;
 
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(
@@ -370,20 +392,19 @@ class AudioStream {
    * Decimates audio frames client-side to keep latency low for AI ingestion.
    */
   _downsample(chunk) {
-    const sampleCount = Math.floor(chunk.length / 2);
-    const outputSamples = Math.floor(sampleCount / 3);
-    if (outputSamples <= 0) {
-      return Buffer.alloc(0);
+    const output = Buffer.allocUnsafe(Math.floor(chunk.length / 12) * 2);
+    let outIndex = 0;
+
+    for (let offset = 0; offset + 3 < chunk.length; offset += 12) {
+      const left = chunk.readInt16LE(offset);
+      const right = chunk.readInt16LE(offset + 2);
+      const mixed = Math.round((left + right) / 2);
+
+      output.writeInt16LE(mixed, outIndex);
+      outIndex += 2;
     }
 
-    const output = Buffer.allocUnsafe(outputSamples * 2);
-
-    for (let i = 0; i < outputSamples; i += 1) {
-      const value = chunk.readInt16LE(i * 3 * 2);
-      output.writeInt16LE(value, i * 2);
-    }
-
-    return output;
+    return output.subarray(0, outIndex);
   }
 
   /**
