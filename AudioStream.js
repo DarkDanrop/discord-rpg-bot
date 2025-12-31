@@ -4,7 +4,7 @@ const prism = require('prism-media');
 
 prism.FFmpeg.getPath = () => require('ffmpeg-static');
 
-const VAD_THRESHOLD = 800;
+const VAD_THRESHOLD = 2500; // Filters background static so silence truly ends a turn
 const DISCORD_SAMPLE_RATE = 48000;
 const AI_SAMPLE_RATE = 16000;
 const RESPONSE_SILENCE_TIMEOUT_MS = 3000;
@@ -56,6 +56,8 @@ class AudioStream {
 
     this.reconnectAttempts = 0;
     this.reconnectTimer = null;
+
+    this.heartbeatInterval = null;
   }
 
   /**
@@ -176,6 +178,8 @@ class AudioStream {
     this.ws.on('open', () => {
       this.log.info?.('Conectado à Conversational AI (WebSocket)');
       this.reconnectAttempts = 0;
+
+      this._startHeartbeat();
     });
 
     this.ws.on('message', (data) => this._handleWebSocketMessage(data));
@@ -188,6 +192,7 @@ class AudioStream {
 
       const description = `WebSocket fechado (${code}) ${readableReason}`.trim();
       this.log.warn?.(`${description} — tentando reconectar...`);
+      this._clearHeartbeat();
       this.ws = null;
       this._scheduleReconnect();
     });
@@ -196,6 +201,23 @@ class AudioStream {
       this.log.error?.('Erro no WebSocket:', err?.message || err);
       this._scheduleReconnect();
     });
+  }
+
+  _startHeartbeat() {
+    this._clearHeartbeat();
+
+    this.heartbeatInterval = setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30000);
+  }
+
+  _clearHeartbeat() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
   }
 
   _scheduleReconnect() {
@@ -223,6 +245,17 @@ class AudioStream {
    */
   _handleInputChunk(chunk) {
     if (!chunk?.length) return;
+
+    let hasSpeech = false;
+    for (let i = 0; i < chunk.length; i += 2) {
+      const value = Math.abs(chunk.readInt16LE(i));
+      if (value > VAD_THRESHOLD) {
+        hasSpeech = true;
+        break;
+      }
+    }
+
+    if (!hasSpeech) return;
 
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(
@@ -366,6 +399,8 @@ class AudioStream {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+
+    this._clearHeartbeat();
 
     try {
       this.opusStream?.destroy();
