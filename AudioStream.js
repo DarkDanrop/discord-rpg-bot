@@ -59,6 +59,9 @@ class AudioStream {
 
     this.heartbeatInterval = null;
 
+    this.watchdogInterval = null;
+    this.lastAudioPacketTime = Date.now();
+
     this.speakingFrames = 0;
     this.silenceFrames = 0;
     this.isSpeaking = false;
@@ -126,6 +129,7 @@ class AudioStream {
 
       decoder.on('data', (chunk) => {
         try {
+          this.lastAudioPacketTime = Date.now();
           const downsampled = this._downsample(chunk);
           this._handleInputChunk(downsampled);
 
@@ -143,6 +147,18 @@ class AudioStream {
     };
 
     setupDecoderStream();
+
+    if (!this.watchdogInterval) {
+      this.watchdogInterval = setInterval(() => {
+        const timeSinceLastPacket = Date.now() - this.lastAudioPacketTime;
+
+        if (timeSinceLastPacket > 500 && this.isSpeaking) {
+          this.isSpeaking = false;
+          this.silenceFrames = 0;
+          this.log.info?.('🛑 Watchdog: Stream stopped (Mute detected). Ending turn.');
+        }
+      }, 200);
+    }
   }
 
   /**
@@ -419,6 +435,11 @@ class AudioStream {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval);
+      this.watchdogInterval = null;
     }
 
     this._clearHeartbeat();
