@@ -4,8 +4,14 @@ const prism = require('prism-media');
 
 prism.FFmpeg.getPath = () => require('ffmpeg-static');
 
+const VAD_THRESHOLD = 800;
+const DISCORD_SAMPLE_RATE = 48000;
+const AI_SAMPLE_RATE = 16000;
 const RESPONSE_SILENCE_TIMEOUT_MS = 3000;
 const RESPONSE_SILENCE_PADDING_BYTES = 9600; // ~200ms of silence padding
+const MAX_WS_RECONNECT_ATTEMPTS = 5;
+const MAX_WS_RECONNECT_DELAY_MS = 8000;
+const WS_RECONNECT_BASE_DELAY_MS = 1000;
 
 const {
   EndBehaviorType,
@@ -47,8 +53,15 @@ class AudioStream {
 
     this.currentResponseStream = null;
     this.silenceTimeout = null;
+
+    this.reconnectAttempts = 0;
+    this.reconnectTimer = null;
   }
 
+  /**
+   * Bootstraps bidirectional audio once Discord voice is ready.
+   * Keeps the battle-tested input/output pipelines intact to avoid regression.
+   */
   async start() {
     if (this.stopped) return;
 
@@ -59,12 +72,16 @@ class AudioStream {
     this._connectWebSocket();
   }
 
+  /**
+   * Manual JS VAD/downsampling to avoid FFmpeg pipe latency and maintain Railway/Discord stability.
+   * Do not change this logic — it is tuned for production environments.
+   */
   _setupInputPipeline() {
     this.opusStream = this.connection.receiver.subscribe(this.userId, {
       end: { behavior: EndBehaviorType.Manual },
     });
 
-    this.inputDecoder = new prism.opus.Decoder({ rate: 48000, channels: 1, frameSize: 960 });
+    this.inputDecoder = new prism.opus.Decoder({ rate: DISCORD_SAMPLE_RATE, channels: 1, frameSize: 960 });
     this.inputDecoder.on('error', () => {
       this.log.warn?.('⚠️ Decoder glitch ignored');
     });
@@ -88,6 +105,9 @@ class AudioStream {
     });
   }
 
+  /**
+   * Keeps playback isolated and logs transitions so we can spot Discord player hiccups quickly.
+   */
   _setupOutputPipeline() {
     this.player = createAudioPlayer();
     this.player.on('stateChange', (oldState, newState) => {
@@ -100,10 +120,18 @@ class AudioStream {
     this.subscription = this.connection.subscribe(this.player);
   }
 
+  /**
+   * Connects to ElevenLabs WS with reconnection via exponential backoff to survive transient drops.
+   */
   _connectWebSocket() {
     const url = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(
       this.agentId,
     )}&output_format=pcm_16000`;
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
 
     this.ws = new WebSocket(url, {
       headers: {
@@ -113,6 +141,7 @@ class AudioStream {
 
     this.ws.on('open', () => {
       this.log.info?.('Conectado à Conversational AI (WebSocket)');
+      this.reconnectAttempts = 0;
     });
 
     this.ws.on('message', (data) => this._handleWebSocketMessage(data));
@@ -121,15 +150,43 @@ class AudioStream {
 
     this.ws.on('close', (code, reason) => {
       const readableReason = reason?.toString?.() || '';
-      this.stop(`WebSocket fechado (${code}) ${readableReason}`.trim());
+      if (this.stopped) return;
+
+      const description = `WebSocket fechado (${code}) ${readableReason}`.trim();
+      this.log.warn?.(`${description} — tentando reconectar...`);
+      this.ws = null;
+      this._scheduleReconnect();
     });
 
     this.ws.on('error', (err) => {
       this.log.error?.('Erro no WebSocket:', err?.message || err);
-      this.stop('erro no WebSocket');
+      this._scheduleReconnect();
     });
   }
 
+  _scheduleReconnect() {
+    if (this.stopped) return;
+    if (this.reconnectTimer) return;
+
+    if (this.reconnectAttempts >= MAX_WS_RECONNECT_ATTEMPTS) {
+      this.stop('limite de reconexões do WebSocket atingido');
+      return;
+    }
+
+    const delay = Math.min(
+      WS_RECONNECT_BASE_DELAY_MS * 2 ** this.reconnectAttempts,
+      MAX_WS_RECONNECT_DELAY_MS,
+    );
+    this.reconnectAttempts += 1;
+
+    this.reconnectTimer = setTimeout(() => {
+      this._connectWebSocket();
+    }, delay);
+  }
+
+  /**
+   * Pushes downsampled PCM chunks upstream while avoiding backpressure overhead.
+   */
   _handleInputChunk(chunk) {
     if (!chunk?.length) return;
 
@@ -142,6 +199,9 @@ class AudioStream {
     }
   }
 
+  /**
+   * Routes ElevenLabs responses back into Discord playback with lightweight parsing.
+   */
   _handleWebSocketMessage(data) {
     try {
       const parsed = JSON.parse(data.toString());
@@ -167,6 +227,9 @@ class AudioStream {
     }
   }
 
+  /**
+   * Raw PCM re-encoding via FFmpeg; keep args untouched to satisfy Discord/FFmpeg quirks.
+   */
   _writeOutputAudio(buffer) {
     if (!buffer?.length) return;
 
@@ -183,7 +246,7 @@ class AudioStream {
         '-f',
         's16le',
         '-ar',
-        '16000',
+        String(AI_SAMPLE_RATE),
         '-ac',
         '1',
         '-i',
@@ -191,7 +254,7 @@ class AudioStream {
         '-f',
         's16le',
         '-ar',
-        '48000',
+        String(DISCORD_SAMPLE_RATE),
         '-ac',
         '2',
       ];
@@ -236,6 +299,9 @@ class AudioStream {
     }, RESPONSE_SILENCE_TIMEOUT_MS);
   }
 
+  /**
+   * Decimates audio frames client-side to keep latency low for AI ingestion.
+   */
   _downsample(chunk) {
     const sampleCount = Math.floor(chunk.length / 2);
     const outputSamples = Math.floor(sampleCount / 3);
@@ -253,11 +319,19 @@ class AudioStream {
     return output;
   }
 
+  /**
+   * Tear down every stream handle so we don't leak resources between sessions.
+   */
   stop(reason) {
     if (this.stopped) return;
     this.stopped = true;
 
     this.log.info?.(`Encerrando AudioStream${reason ? `: ${reason}` : ''}`);
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
 
     try {
       this.opusStream?.destroy();

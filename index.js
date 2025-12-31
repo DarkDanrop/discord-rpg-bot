@@ -33,8 +33,18 @@ const client = new Client({
 let booted = false;
 let connection = null;
 let audioStream = null;
+let shuttingDown = false;
 
 const COMMAND_PREFIX = '!';
+const HELP_MESSAGE = [
+  'Comandos disponíveis:',
+  '!join - conecta no canal de voz configurado',
+  '!leave - sai do canal de voz',
+  '!realtime - inicia streaming bidirecional com a ElevenLabs (autor da mensagem)',
+  '!stoprealtime - encerra o streaming bidirecional ativo',
+  '!ping - teste rápido de vida do bot',
+  '!help - mostra esta mensagem',
+].join('\n');
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -153,107 +163,135 @@ client.on('messageCreate', async (message) => {
     .split(/\s+/);
 
   const cmd = command?.toLowerCase();
+  await handleCommand(message, cmd);
+});
 
-  if (cmd === 'ping') {
-    await message.reply('Pong!');
-    return;
+async function handleCommand(message, cmd) {
+  switch (cmd) {
+    case 'ping':
+      await message.reply('Pong!');
+      break;
+    case 'help':
+      await message.reply(HELP_MESSAGE);
+      break;
+    case 'join':
+      await handleJoin(message);
+      break;
+    case 'leave':
+      await handleLeave(message);
+      break;
+    case 'realtime':
+      await handleRealtime(message);
+      break;
+    case 'stoprealtime':
+      await handleStopRealtime(message);
+      break;
+    default:
+      break;
   }
+}
 
-  if (cmd === 'help') {
+async function handleJoin(message) {
+  try {
+    await safeConnectLoop();
+    await message.reply('Entrei (ou já estava) no canal de voz configurado.');
+  } catch (err) {
+    const reason = err?.message || String(err);
+    await message.reply(`Não consegui entrar no voice: ${reason}`);
+  }
+}
+
+async function handleLeave(message) {
+  if (connection) {
+    try {
+      stopAudioStream('leave command');
+      connection.destroy();
+      connection = null;
+      await message.reply('Saí do canal de voz.');
+    } catch (err) {
+      const reason = err?.message || String(err);
+      await message.reply(`Erro ao sair do voice: ${reason}`);
+    }
+  } else {
+    await message.reply('Não estou em nenhum canal de voz agora.');
+  }
+}
+
+async function handleRealtime(message) {
+  if (!ELEVENLABS_AGENT_ID || !ELEVENLABS_API_KEY) {
     await message.reply(
-      [
-        'Comandos disponíveis:',
-        '!join - conecta no canal de voz configurado',
-        '!leave - sai do canal de voz',
-        '!realtime - inicia streaming bidirecional com a ElevenLabs (autor da mensagem)',
-        '!stoprealtime - encerra o streaming bidirecional ativo',
-        '!ping - teste rápido de vida do bot',
-        '!help - mostra esta mensagem',
-      ].join('\n'),
+      'Configure ELEVENLABS_AGENT_ID e ELEVENLABS_API_KEY para usar o modo em tempo real.',
     );
     return;
   }
 
-  if (cmd === 'join') {
-    try {
-      await safeConnectLoop();
-      await message.reply('Entrei (ou já estava) no canal de voz configurado.');
-    } catch (err) {
-      const reason = err?.message || String(err);
-      await message.reply(`Não consegui entrar no voice: ${reason}`);
-    }
+  const member = message.member;
+  const memberVoiceChannelId = member?.voice?.channelId;
+  if (!memberVoiceChannelId) {
+    await message.reply('Você precisa estar em um canal de voz para iniciar o streaming.');
     return;
   }
 
-  if (cmd === 'leave') {
-    if (connection) {
-      try {
-        stopAudioStream('leave command');
-        connection.destroy();
-        connection = null;
-        await message.reply('Saí do canal de voz.');
-      } catch (err) {
-        const reason = err?.message || String(err);
-        await message.reply(`Erro ao sair do voice: ${reason}`);
-      }
-    } else {
-      await message.reply('Não estou em nenhum canal de voz agora.');
-    }
+  if (memberVoiceChannelId !== VOICE_CHANNEL_ID) {
+    await message.reply(
+      'Entre primeiro no canal de voz configurado (VOICE_CHANNEL_ID) para iniciar o streaming.',
+    );
     return;
   }
 
-  if (cmd === 'realtime') {
-    if (!ELEVENLABS_AGENT_ID || !ELEVENLABS_API_KEY) {
-      await message.reply(
-        'Configure ELEVENLABS_AGENT_ID e ELEVENLABS_API_KEY para usar o modo em tempo real.',
-      );
-      return;
-    }
+  try {
+    await safeConnectLoop();
+    stopAudioStream('novo streaming solicitado');
 
-    const member = message.member;
-    const memberVoiceChannelId = member?.voice?.channelId;
-    if (!memberVoiceChannelId) {
-      await message.reply('Você precisa estar em um canal de voz para iniciar o streaming.');
-      return;
-    }
+    audioStream = new AudioStream(connection, member.id, {
+      agentId: ELEVENLABS_AGENT_ID,
+      apiKey: ELEVENLABS_API_KEY,
+      log: console,
+    });
 
-    if (memberVoiceChannelId !== VOICE_CHANNEL_ID) {
-      await message.reply(
-        'Entre primeiro no canal de voz configurado (VOICE_CHANNEL_ID) para iniciar o streaming.',
-      );
-      return;
-    }
+    await audioStream.start();
 
-    try {
-      await safeConnectLoop();
-      stopAudioStream('novo streaming solicitado');
+    await message.reply(
+      'Streaming bidirecional iniciado. Fale no canal e receba a resposta do agente em tempo real.',
+    );
+  } catch (err) {
+    stopAudioStream('falha ao iniciar streaming');
+    const reason = err?.message || String(err);
+    await message.reply(`Não consegui iniciar o streaming: ${reason}`);
+  }
+}
 
-      audioStream = new AudioStream(connection, member.id, {
-        agentId: ELEVENLABS_AGENT_ID,
-        apiKey: ELEVENLABS_API_KEY,
-        log: console,
-      });
+async function handleStopRealtime(message) {
+  if (audioStream) {
+    stopAudioStream('pedido do usuário');
+    await message.reply('Streaming bidirecional interrompido.');
+  } else {
+    await message.reply('Nenhum streaming bidirecional estava ativo.');
+  }
+}
 
-      await audioStream.start();
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
 
-      await message.reply(
-        'Streaming bidirecional iniciado. Fale no canal e receba a resposta do agente em tempo real.',
-      );
-    } catch (err) {
-      stopAudioStream('falha ao iniciar streaming');
-      const reason = err?.message || String(err);
-      await message.reply(`Não consegui iniciar o streaming: ${reason}`);
-    }
-    return;
+  console.log(`Recebido ${signal}, encerrando bot...`);
+  stopAudioStream('shutdown');
+  try {
+    connection?.destroy();
+  } catch {}
+  connection = null;
+
+  try {
+    await client.destroy();
+  } catch (err) {
+    console.error('Erro ao destruir client:', err?.message || err);
   }
 
-  if (cmd === 'stoprealtime') {
-    if (audioStream) {
-      stopAudioStream('pedido do usuário');
-      await message.reply('Streaming bidirecional interrompido.');
-    } else {
-      await message.reply('Nenhum streaming bidirecional estava ativo.');
-    }
-    return;
-  }
+  process.exit(0);
+}
+
+['SIGINT', 'SIGTERM'].forEach((signal) => {
+  process.on(signal, () => {
+    gracefulShutdown(signal);
+  });
 });
