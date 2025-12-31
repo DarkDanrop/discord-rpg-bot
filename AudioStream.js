@@ -263,13 +263,13 @@ class AudioStream {
 
     if (amplitude > VAD_THRESHOLD) {
       this.speakingFrames += 1;
-      this. = 0;
+      this.silenceFrames = 0;
 
       if (this.speakingFrames >= 3) {
         this.isSpeaking = true;
       }
     } else {
-      this. += 1;
+      this.silenceFrames += 1;
       this.speakingFrames = 0;
 
       if (this.silenceFrames > 80) {
