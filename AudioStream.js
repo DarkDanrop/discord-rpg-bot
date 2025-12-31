@@ -81,28 +81,62 @@ class AudioStream {
       end: { behavior: EndBehaviorType.Manual },
     });
 
-    this.inputDecoder = new prism.opus.Decoder({ rate: DISCORD_SAMPLE_RATE, channels: 1, frameSize: 960 });
-    this.inputDecoder.on('error', () => {
-      this.log.warn?.('⚠️ Decoder glitch ignored');
-    });
-
     this.opusStream.on('error', () => {});
-    this.opusStream.pipe(this.inputDecoder);
 
-    this.inputDecoder.on('data', (chunk) => {
-      try {
-        const downsampled = this._downsample(chunk);
-        this._handleInputChunk(downsampled);
+    const setupDecoderStream = () => {
+      if (this.stopped) return;
 
-        const now = Date.now();
-        if (now - this.lastInputLog > 1000) {
-          this.log.info?.('🎤 Voice detected');
-          this.lastInputLog = now;
-        }
-      } catch (err) {
-        this.log.warn?.('Erro ao processar áudio de entrada', err?.message || err);
+      if (this.inputDecoder) {
+        try {
+          this.opusStream?.unpipe(this.inputDecoder);
+        } catch {}
+
+        try {
+          this.inputDecoder.removeAllListeners();
+          this.inputDecoder.destroy();
+        } catch {}
       }
-    });
+
+      const decoder = new prism.opus.Decoder({ rate: DISCORD_SAMPLE_RATE, channels: 1, frameSize: 960 });
+      this.inputDecoder = decoder;
+
+      decoder.on('error', () => {
+        this.log.warn?.('⚠️ Decoder glitch ignored; recovering');
+
+        try {
+          this.opusStream?.unpipe(decoder);
+        } catch {}
+        try {
+          decoder.destroy();
+        } catch {}
+
+        if (this.stopped) return;
+
+        setTimeout(() => {
+          if (this.stopped) return;
+          setupDecoderStream();
+        }, 75);
+      });
+
+      decoder.on('data', (chunk) => {
+        try {
+          const downsampled = this._downsample(chunk);
+          this._handleInputChunk(downsampled);
+
+          const now = Date.now();
+          if (now - this.lastInputLog > 3000) {
+            this.log.info?.('🎤 User is speaking...');
+            this.lastInputLog = now;
+          }
+        } catch (err) {
+          this.log.warn?.('Erro ao processar áudio de entrada', err?.message || err);
+        }
+      });
+
+      this.opusStream.pipe(decoder);
+    };
+
+    setupDecoderStream();
   }
 
   /**
