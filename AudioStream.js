@@ -142,28 +142,32 @@ class AudioStream {
           this._handleInputChunk(downsampled);
 
           if (!wasSpeaking && this.isSpeaking) {
-            this.log.info?.('🔥 INTERRUPT TRIGGERED');
-            this.isInterrupting = true;
-            if (this.player?.state?.status !== 'idle') {
-              this.log.info?.('✋ User interrupted bot. Stopping playback.');
-              try {
-                this.player.stop();
-              } catch {}
-            }
+            const isBotActive = this.player?.state?.status !== 'idle';
 
-            if (this.currentResponseStream) {
-              try {
-                this.currentResponseStream.destroy();
-              } catch {}
-            }
-            this.currentResponseStream = null;
+            if (isBotActive) {
+              this.log.info?.('🔥 INTERRUPT TRIGGERED');
+              this.isInterrupting = true;
+              if (this.player?.state?.status !== 'idle') {
+                this.log.info?.('✋ User interrupted bot. Stopping playback.');
+                try {
+                  this.player.stop();
+                } catch {}
+              }
 
-            if (this.silenceTimeout) {
-              clearTimeout(this.silenceTimeout);
-              this.silenceTimeout = null;
-            }
+              if (this.currentResponseStream) {
+                try {
+                  this.currentResponseStream.destroy();
+                } catch {}
+              }
+              this.currentResponseStream = null;
 
-            this.speakingFrames = 0;
+              if (this.silenceTimeout) {
+                clearTimeout(this.silenceTimeout);
+                this.silenceTimeout = null;
+              }
+
+              this.speakingFrames = 0;
+            }
           }
 
           const now = Date.now();
