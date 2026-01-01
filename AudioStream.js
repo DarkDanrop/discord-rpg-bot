@@ -191,7 +191,7 @@ class AudioStream {
       this.watchdogInterval = setInterval(() => {
         const timeSinceLastPacket = Date.now() - this.lastAudioPacketTime;
 
-        if (timeSinceLastPacket > 500 && this.isSpeaking) {
+        if (timeSinceLastPacket > 1000 && this.isSpeaking) {
           this._onSilenceDetected();
           this.log.info?.('🛑 Watchdog: Stream stopped. Ending turn.');
         }
@@ -341,7 +341,7 @@ class AudioStream {
       this.silenceFrames += 1;
       this.speakingFrames = 0;
 
-      if (this.silenceFrames > 80) {
+      if (this.silenceFrames > 150) {
         this._onSilenceDetected();
       }
     }
