@@ -65,8 +65,9 @@ class AudioStream {
     this.speakingFrames = 0;
     this.silenceFrames = 0;
     this.isSpeaking = false;
-    this.isRecovering = false;
     this.isInterrupting = false;
+
+    this.responseWatchdog = null;
   }
 
   /**
@@ -94,14 +95,20 @@ class AudioStream {
 
     this.opusStream.on('error', () => {});
 
+    this.opusStream.on('data', (chunk) => {
+      if (!this.inputDecoder) return;
+
+      try {
+        this.inputDecoder.write(chunk);
+      } catch {
+        // Drop bad packets to avoid decoder glitch loops
+      }
+    });
+
     const setupDecoderStream = () => {
       if (this.stopped) return;
 
       if (this.inputDecoder) {
-        try {
-          this.opusStream?.unpipe(this.inputDecoder);
-        } catch {}
-
         try {
           this.inputDecoder.removeAllListeners();
           this.inputDecoder.destroy();
@@ -111,28 +118,7 @@ class AudioStream {
       const decoder = new prism.opus.Decoder({ rate: DISCORD_SAMPLE_RATE, channels: 2, frameSize: 960 });
       this.inputDecoder = decoder;
 
-      decoder.on('error', () => {
-        if (this.isRecovering) return;
-
-        this.isRecovering = true;
-        this.log.warn?.('⚠️ Decoder glitch detected. Cooling down...');
-
-        try {
-          this.opusStream?.unpipe(decoder);
-        } catch {}
-        try {
-          decoder.destroy();
-        } catch {}
-
-        setTimeout(() => {
-          if (this.stopped) {
-            this.isRecovering = false;
-            return;
-          }
-          setupDecoderStream();
-          this.isRecovering = false;
-        }, 500);
-      });
+      decoder.on('error', () => {});
 
       decoder.on('data', (chunk) => {
         try {
@@ -181,8 +167,6 @@ class AudioStream {
           this.log.warn?.('Erro ao processar áudio de entrada', err?.message || err);
         }
       });
-
-      this.opusStream.pipe(decoder);
     };
 
     setupDecoderStream();
@@ -309,6 +293,19 @@ class AudioStream {
     this.speakingFrames = 0;
     this.silenceFrames = 0;
     this.log.info?.('🤫 Silence detected. Ending turn.');
+
+    if (this.responseWatchdog) {
+      clearTimeout(this.responseWatchdog);
+      this.responseWatchdog = null;
+    }
+
+    this.responseWatchdog = setTimeout(() => {
+      this.log.warn?.('🚨 AI Unresponsive - Refreshing Connection');
+      try {
+        this.ws?.close();
+      } catch {}
+      this._connectWebSocket();
+    }, 6000);
   }
 
   /**
@@ -372,6 +369,11 @@ class AudioStream {
       const audioBase64 = payload?.audio_event?.audio_base_64 || payload?.audio_base_64;
 
       if (audioBase64) {
+        if (this.responseWatchdog) {
+          clearTimeout(this.responseWatchdog);
+          this.responseWatchdog = null;
+        }
+
         this._writeOutputAudio(Buffer.from(audioBase64, 'base64'));
 
         const now = Date.now();
@@ -515,6 +517,11 @@ class AudioStream {
     if (this.watchdogInterval) {
       clearInterval(this.watchdogInterval);
       this.watchdogInterval = null;
+    }
+
+    if (this.responseWatchdog) {
+      clearTimeout(this.responseWatchdog);
+      this.responseWatchdog = null;
     }
 
     this._clearHeartbeat();
