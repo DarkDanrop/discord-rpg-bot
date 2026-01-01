@@ -66,6 +66,7 @@ class AudioStream {
     this.silenceFrames = 0;
     this.isSpeaking = false;
     this.isRecovering = false;
+    this.isInterrupting = false;
   }
 
   /**
@@ -142,6 +143,7 @@ class AudioStream {
 
           if (!wasSpeaking && this.isSpeaking) {
             this.log.info?.('🔥 INTERRUPT TRIGGERED');
+            this.isInterrupting = true;
             if (this.player?.state?.status !== 'idle') {
               this.log.info?.('✋ User interrupted bot. Stopping playback.');
               try {
@@ -186,6 +188,7 @@ class AudioStream {
         if (timeSinceLastPacket > 500 && this.isSpeaking) {
           this.isSpeaking = false;
           this.silenceFrames = 0;
+          this.isInterrupting = false;
           this.log.info?.('🛑 Watchdog: Stream stopped (Mute detected). Ending turn.');
         }
       }, 200);
@@ -233,7 +236,10 @@ class AudioStream {
       this._startHeartbeat();
     });
 
-    this.ws.on('message', (data) => this._handleWebSocketMessage(data));
+    this.ws.on('message', (data) => {
+      if (this.isInterrupting) return;
+      this._handleWebSocketMessage(data);
+    });
 
     this.ws.on('ping', () => {});
 
@@ -297,6 +303,7 @@ class AudioStream {
   _handleInputChunk(chunk) {
     if (!chunk?.length) return;
 
+    const wasSpeaking = this.isSpeaking;
     let amplitude = 0;
     for (let i = 0; i < chunk.length; i += 2) {
       const value = Math.abs(chunk.readInt16LE(i));
@@ -324,7 +331,12 @@ class AudioStream {
       }
     }
 
-    if (!this.isSpeaking) return;
+    if (!this.isSpeaking) {
+      if (wasSpeaking) {
+        this.isInterrupting = false;
+      }
+      return;
+    }
 
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(
@@ -375,6 +387,7 @@ class AudioStream {
       this.currentResponseStream.writableEnded;
 
     if (streamEnded) {
+      this.log.info?.('🔊 Starting new audio response stream');
       this.currentResponseStream = new PassThrough({ highWaterMark: 1024 * 1024 });
       this.currentResponseStream.on('error', () => {});
 
