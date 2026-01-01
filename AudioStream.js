@@ -4,7 +4,8 @@ const prism = require('prism-media');
 
 prism.FFmpeg.getPath = () => require('ffmpeg-static');
 
-const VAD_THRESHOLD = 200; // Filters background static so silence truly ends a turn
+const VAD_THRESHOLD_IDLE = 200; // Filters background static so silence truly ends a turn
+const VAD_THRESHOLD_ACTIVE = 3000; // Less sensitive while bot is speaking to ignore echo
 const DISCORD_SAMPLE_RATE = 48000;
 const AI_SAMPLE_RATE = 16000;
 const RESPONSE_SILENCE_TIMEOUT_MS = 3000;
@@ -308,18 +309,20 @@ class AudioStream {
     if (!chunk?.length) return;
 
     const wasSpeaking = this.isSpeaking;
+    const isBotSpeaking = this.player?.state?.status === 'playing';
+    const currentThreshold = isBotSpeaking ? VAD_THRESHOLD_ACTIVE : VAD_THRESHOLD_IDLE;
     let amplitude = 0;
     for (let i = 0; i < chunk.length; i += 2) {
       const value = Math.abs(chunk.readInt16LE(i));
       if (value > amplitude) {
         amplitude = value;
       }
-      if (amplitude > VAD_THRESHOLD) {
+      if (amplitude > currentThreshold) {
         break;
       }
     }
 
-    if (amplitude > VAD_THRESHOLD) {
+    if (amplitude > currentThreshold) {
       this.speakingFrames += 1;
       this.silenceFrames = 0;
 
