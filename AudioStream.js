@@ -65,6 +65,7 @@ class AudioStream {
     this.speakingFrames = 0;
     this.silenceFrames = 0;
     this.isSpeaking = false;
+    this.isRecovering = false;
   }
 
   /**
@@ -110,7 +111,10 @@ class AudioStream {
       this.inputDecoder = decoder;
 
       decoder.on('error', () => {
-        this.log.warn?.('⚠️ Decoder glitch ignored; recovering');
+        if (this.isRecovering) return;
+
+        this.isRecovering = true;
+        this.log.warn?.('⚠️ Decoder glitch detected. Cooling down...');
 
         try {
           this.opusStream?.unpipe(decoder);
@@ -119,12 +123,14 @@ class AudioStream {
           decoder.destroy();
         } catch {}
 
-        if (this.stopped) return;
-
         setTimeout(() => {
-          if (this.stopped) return;
+          if (this.stopped) {
+            this.isRecovering = false;
+            return;
+          }
           setupDecoderStream();
-        }, 75);
+          this.isRecovering = false;
+        }, 500);
       });
 
       decoder.on('data', (chunk) => {
