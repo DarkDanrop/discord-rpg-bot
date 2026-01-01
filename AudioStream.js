@@ -302,10 +302,12 @@ class AudioStream {
   }
 
   _onSilenceDetected() {
+    if (!this.isSpeaking && !this.isInterrupting) return;
+
     this.isSpeaking = false;
     this.isInterrupting = false;
-    this.silenceFrames = 0;
     this.speakingFrames = 0;
+    this.silenceFrames = 0;
     this.log.info?.('🤫 Silence detected. Ending turn.');
   }
 
