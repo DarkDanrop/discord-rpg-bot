@@ -158,7 +158,9 @@ class AudioStream {
               if (this.currentResponseStream) {
                 try {
                   this.currentResponseStream.destroy();
-                } catch {}
+                } catch (err) {
+                  this.log.debug?.('⚠️ Error destroying response stream during interrupt', err);
+                }
               }
               this.currentResponseStream = null;
 
@@ -416,7 +418,23 @@ class AudioStream {
       ];
 
       const ffmpeg = new prism.FFmpeg({ args });
-      ffmpeg.on('error', (err) => this.log.warn?.('⚠️ FFmpeg error', err?.message || err));
+      ffmpeg.on('error', (err) => {
+        const message = err?.message || String(err);
+        const isPrematureClose = message?.toLowerCase?.().includes('premature close');
+
+        if (isPrematureClose && this.isInterrupting) {
+          this.log.debug?.('FFmpeg ended early during interruption:', message);
+          return;
+        }
+
+        this.log.warn?.('⚠️ FFmpeg error', message);
+
+        try {
+          if (ffmpeg.process?.exitCode === null) {
+            ffmpeg.process.kill('SIGKILL');
+          }
+        } catch {}
+      });
 
       this.currentResponseStream.pipe(ffmpeg);
 
