@@ -142,7 +142,7 @@ class AudioStream {
 
           if (!wasSpeaking && this.isSpeaking) {
             this.log.info?.('🔥 INTERRUPT TRIGGERED');
-            if (this.player?.state?.status === 'playing') {
+            if (this.player?.state?.status !== 'idle') {
               this.log.info?.('✋ User interrupted bot. Stopping playback.');
               try {
                 this.player.stop();
@@ -162,10 +162,6 @@ class AudioStream {
             }
 
             this.speakingFrames = 0;
-
-            try {
-              this.ws?.send(JSON.stringify({ type: 'interrupt' }));
-            } catch {}
           }
 
           const now = Date.now();
