@@ -141,6 +141,7 @@ class AudioStream {
           this._handleInputChunk(downsampled);
 
           if (!wasSpeaking && this.isSpeaking) {
+            this.log.info?.('🔥 INTERRUPT TRIGGERED');
             if (this.player?.state?.status === 'playing') {
               this.log.info?.('✋ User interrupted bot. Stopping playback.');
               try {
@@ -152,16 +153,18 @@ class AudioStream {
               try {
                 this.currentResponseStream.destroy();
               } catch {}
-              this.currentResponseStream = null;
             }
+            this.currentResponseStream = null;
 
             if (this.silenceTimeout) {
               clearTimeout(this.silenceTimeout);
               this.silenceTimeout = null;
             }
 
+            this.speakingFrames = 0;
+
             try {
-              this.ws?.send(JSON.stringify({ text: ' ' }));
+              this.ws?.send(JSON.stringify({ type: 'interrupt' }));
             } catch {}
           }
 
