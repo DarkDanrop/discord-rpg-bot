@@ -135,9 +135,35 @@ class AudioStream {
 
       decoder.on('data', (chunk) => {
         try {
+          const wasSpeaking = this.isSpeaking;
           this.lastAudioPacketTime = Date.now();
           const downsampled = this._downsample(chunk);
           this._handleInputChunk(downsampled);
+
+          if (!wasSpeaking && this.isSpeaking) {
+            if (this.player?.state?.status === 'playing') {
+              this.log.info?.('✋ User interrupted bot. Stopping playback.');
+              try {
+                this.player.stop();
+              } catch {}
+            }
+
+            if (this.currentResponseStream) {
+              try {
+                this.currentResponseStream.destroy();
+              } catch {}
+              this.currentResponseStream = null;
+            }
+
+            if (this.silenceTimeout) {
+              clearTimeout(this.silenceTimeout);
+              this.silenceTimeout = null;
+            }
+
+            try {
+              this.ws?.send(JSON.stringify({ text: ' ' }));
+            } catch {}
+          }
 
           const now = Date.now();
           if (now - this.lastInputLog > 3000) {
