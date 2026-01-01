@@ -68,6 +68,8 @@ class AudioStream {
     this.isInterrupting = false;
 
     this.responseWatchdog = null;
+
+    this.lastReconnectionTime = 0;
   }
 
   /**
@@ -202,6 +204,13 @@ class AudioStream {
    * Connects to ElevenLabs WS with reconnection via exponential backoff to survive transient drops.
    */
   _connectWebSocket() {
+    const now = Date.now();
+    if (now - this.lastReconnectionTime < 2000) {
+      this.log.warn?.('⚠️ Ignoring rapid reconnection attempt.');
+      return;
+    }
+    this.lastReconnectionTime = now;
+
     const url = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(
       this.agentId,
     )}&output_format=pcm_16000`;
@@ -255,7 +264,7 @@ class AudioStream {
       if (this.ws?.readyState === WebSocket.OPEN) {
         this.ws.ping();
       }
-    }, 30000);
+    }, 10000);
   }
 
   _clearHeartbeat() {
@@ -305,7 +314,7 @@ class AudioStream {
         this.ws?.close();
       } catch {}
       this._connectWebSocket();
-    }, 6000);
+    }, 15000);
   }
 
   /**
