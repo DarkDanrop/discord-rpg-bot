@@ -4,8 +4,7 @@ const prism = require('prism-media');
 
 prism.FFmpeg.getPath = () => require('ffmpeg-static');
 
-const VAD_THRESHOLD_IDLE = 200; // Filters background static so silence truly ends a turn
-const VAD_THRESHOLD_ACTIVE = 3000; // Less sensitive while bot is speaking to ignore echo
+const VAD_THRESHOLD = 300; // Static VAD threshold to balance sensitivity and noise
 const DISCORD_SAMPLE_RATE = 48000;
 const AI_SAMPLE_RATE = 16000;
 const RESPONSE_SILENCE_TIMEOUT_MS = 3000;
@@ -193,10 +192,8 @@ class AudioStream {
         const timeSinceLastPacket = Date.now() - this.lastAudioPacketTime;
 
         if (timeSinceLastPacket > 500 && this.isSpeaking) {
-          this.isSpeaking = false;
-          this.silenceFrames = 0;
-          this.isInterrupting = false;
-          this.log.info?.('🛑 Watchdog: Stream stopped (Mute detected). Ending turn.');
+          this._onSilenceDetected();
+          this.log.info?.('🛑 Watchdog: Stream stopped. Ending turn.');
         }
       }, 200);
     }
@@ -304,6 +301,14 @@ class AudioStream {
     }, delay);
   }
 
+  _onSilenceDetected() {
+    this.isSpeaking = false;
+    this.isInterrupting = false;
+    this.silenceFrames = 0;
+    this.speakingFrames = 0;
+    this.log.info?.('🤫 Silence detected. Ending turn.');
+  }
+
   /**
    * Pushes downsampled PCM chunks upstream while avoiding backpressure overhead.
    */
@@ -311,8 +316,7 @@ class AudioStream {
     if (!chunk?.length) return;
 
     const wasSpeaking = this.isSpeaking;
-    const isBotSpeaking = this.player?.state?.status === 'playing';
-    const currentThreshold = isBotSpeaking ? VAD_THRESHOLD_ACTIVE : VAD_THRESHOLD_IDLE;
+    const currentThreshold = VAD_THRESHOLD;
     let amplitude = 0;
     for (let i = 0; i < chunk.length; i += 2) {
       const value = Math.abs(chunk.readInt16LE(i));
@@ -336,7 +340,7 @@ class AudioStream {
       this.speakingFrames = 0;
 
       if (this.silenceFrames > 80) {
-        this.isSpeaking = false;
+        this._onSilenceDetected();
       }
     }
 
